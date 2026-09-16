@@ -143,9 +143,13 @@ ${network.interfaces.map((i) => `  - ${i.name} (${i.family}): ${i.address} [${i.
       setDriveSaveStatus(`¡Guardado en Drive / ${folder.name}!`);
       setTimeout(() => setDriveSaveStatus(null), 3500);
     } catch (err: any) {
-      console.error("Error saving report to Drive:", err);
-      setDriveSaveStatus(err?.message || "Error al guardar en Drive");
-      setTimeout(() => setDriveSaveStatus(null), 4000);
+      if (err?.message?.includes("popup-closed-by-user")) {
+        setDriveSaveStatus(null);
+      } else {
+        console.error("Error saving report to Drive:", err);
+        setDriveSaveStatus(err?.message || "Error al guardar en Drive");
+        setTimeout(() => setDriveSaveStatus(null), 4000);
+      }
     } finally {
       setIsSavingToDrive(false);
     }

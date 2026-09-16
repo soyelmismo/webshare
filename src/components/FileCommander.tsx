@@ -348,8 +348,12 @@ export const FileCommander: React.FC<FileCommanderProps> = ({
         setDriveSession(loadDriveSession());
       }
     } catch (err: any) {
-      console.error(err);
-      setTransferErrorMsg(`Error al iniciar sesión con Google: ${err.message}`);
+      if (err?.message?.includes("popup-closed-by-user")) {
+        console.warn("Sign-in cancelled by user in FileCommander.");
+      } else {
+        console.error(err);
+        setTransferErrorMsg(`Error al iniciar sesión con Google: ${err.message}`);
+      }
     } finally {
       setIsSigningIn(false);
     }
@@ -656,190 +660,175 @@ export const FileCommander: React.FC<FileCommanderProps> = ({
   const activeTransferTask = activeTransfers.find((t) => t.status === "transferring");
 
   return (
-    <div className="space-y-4 animate-in fade-in duration-300">
+    <div className="space-y-4">
       {/* 1. Header Banner: Commander Overview & Storage Status */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl relative overflow-hidden">
-        <div className="absolute top-0 right-0 -mt-10 -mr-10 w-52 h-52 bg-indigo-600/10 rounded-full blur-3xl pointer-events-none" />
-
-        <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 relative z-10">
-          <div className="flex items-start gap-3.5">
-            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-500/20 to-sky-500/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shadow-lg shadow-indigo-950/50 shrink-0">
-              <Columns2 className="w-6 h-6 text-indigo-400" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2 flex-wrap">
-                <h2 className="text-base font-bold text-white tracking-tight">
-                  File Commander • Servidor ⇄ Google Drive
-                </h2>
-                <span className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 font-mono">
-                  Dual-Pane Manager
-                </span>
-                <span className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-mono flex items-center gap-1">
-                  <HardDrive className="w-3 h-3 text-emerald-400" />
-                  Descargas Servidor: {serverDiskStats.usedInDownloadsFormatted}
-                </span>
-              </div>
-              <p className="text-xs text-slate-400 mt-1 max-w-2xl">
-                Administra, visualiza y borra archivos descargados en el servidor local a la izquierda, y transfiere, mueve o copia directamente a tu carpeta seleccionada de Google Drive a la derecha.
-              </p>
-            </div>
+      <div className="bg-slate-900 border border-slate-800/80 rounded-xl p-3.5 flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 shrink-0">
+            <Columns2 className="w-5 h-5" />
           </div>
-
-          {/* Account Selector & Target Folder Switcher */}
-          <div className="flex items-center gap-2.5 self-end md:self-auto flex-wrap justify-end">
-            {currentUser ? (
-              <div className="relative" ref={accountMenuRef}>
-                <button
-                  onClick={() => setIsAccountMenuOpen(!isAccountMenuOpen)}
-                  className="flex items-center gap-2.5 bg-slate-950/90 hover:bg-slate-800 border border-slate-800 hover:border-indigo-500/50 rounded-xl px-3 py-1.5 transition-all cursor-pointer shadow-md"
-                  title="Cambiar o gestionar cuentas de Google"
-                >
-                  {currentUser.photoURL ? (
-                    <img
-                      src={currentUser.photoURL}
-                      alt={currentUser.displayName || "Google"}
-                      className="w-6 h-6 rounded-full border border-indigo-400/40 object-cover"
-                      referrerPolicy="no-referrer"
-                    />
-                  ) : (
-                    <div className="w-6 h-6 rounded-full bg-indigo-600/30 border border-indigo-500/40 flex items-center justify-center text-xs font-bold text-indigo-300">
-                      {currentUser.displayName ? currentUser.displayName[0].toUpperCase() : "G"}
-                    </div>
-                  )}
-                  <div className="text-left hidden sm:block">
-                    <p className="text-xs font-semibold text-white leading-none truncate max-w-[120px]">
-                      {currentUser.displayName || "Google Drive"}
-                    </p>
-                    <p className="text-[10px] text-emerald-400 font-mono leading-none mt-1">
-                      Conectado
-                    </p>
-                  </div>
-                  <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
-                </button>
-
-                {/* Account Switcher Dropdown */}
-                {isAccountMenuOpen && (
-                  <div className="absolute right-0 mt-2 w-72 bg-slate-900 border border-slate-700/80 rounded-2xl shadow-2xl py-2 z-50 animate-in fade-in">
-                    <div className="px-3 py-2 border-b border-slate-800 text-[11px] font-semibold text-slate-400 flex items-center justify-between">
-                      <span>Cuentas de Google Drive</span>
-                      <Users className="w-3.5 h-3.5 text-slate-400" />
-                    </div>
-
-                    <div className="max-h-56 overflow-y-auto py-1">
-                      {driveSession.accounts.map((acc) => {
-                        const isActive = acc.email === currentUser.email;
-                        return (
-                          <div
-                            key={acc.email}
-                            onClick={() => handleSwitchAccount(acc)}
-                            className={`flex items-center justify-between px-3 py-2 text-xs transition-colors cursor-pointer ${
-                              isActive ? "bg-indigo-600/20 text-white" : "text-slate-300 hover:bg-slate-800"
-                            }`}
-                          >
-                            <div className="flex items-center gap-2 truncate">
-                              {acc.photoURL ? (
-                                <img
-                                  src={acc.photoURL}
-                                  alt=""
-                                  className="w-6 h-6 rounded-full shrink-0"
-                                  referrerPolicy="no-referrer"
-                                />
-                              ) : (
-                                <div className="w-6 h-6 rounded-full bg-slate-800 flex items-center justify-center text-[10px] text-slate-200 shrink-0">
-                                  {acc.displayName?.[0] || "G"}
-                                </div>
-                              )}
-                              <div className="truncate text-left">
-                                <p className="font-semibold truncate">{acc.displayName || "Usuario"}</p>
-                                <p className="text-[10px] text-slate-400 font-mono truncate">{acc.email}</p>
-                              </div>
-                            </div>
-                            {isActive && <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />}
-                          </div>
-                        );
-                      })}
-                    </div>
-
-                    <div className="p-2 border-t border-slate-800 text-xs space-y-1">
-                      <button
-                        onClick={handleSignIn}
-                        className="w-full flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-slate-800 text-indigo-300 font-semibold cursor-pointer"
-                      >
-                        <UserPlus className="w-3.5 h-3.5" />
-                        <span>Conectar otra cuenta</span>
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <button
-                onClick={handleSignIn}
-                disabled={isSigningIn}
-                className="gsi-material-button text-xs"
-                title="Conectar Google Drive"
-              >
-                <div className="gsi-material-button-icon">
-                  <GoogleIcon className="w-4 h-4" />
-                </div>
-                <span className="gsi-material-button-contents">
-                  {isSigningIn ? "Conectando..." : "Conectar Google Drive"}
-                </span>
-              </button>
-            )}
+          <div>
+            <div className="flex items-center gap-2">
+              <h2 className="text-sm font-bold text-white">
+                File Commander • Servidor ⇄ Drive
+              </h2>
+              <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
+                <HardDrive className="w-3 h-3 text-emerald-400" />
+                {serverDiskStats.usedInDownloadsFormatted}
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-400">
+              Explorador dual de archivos para transferir, mover o descargar entre servidor y Google Drive.
+            </p>
           </div>
         </div>
 
-        {/* Global Notifications */}
-        {transferSuccessMsg && (
-          <div className="mt-3 p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-xs text-emerald-300 flex items-center justify-between gap-3 shadow-md">
-            <div className="flex items-center gap-2">
-              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-              <span>{transferSuccessMsg}</span>
+        {/* Account Selector */}
+        <div className="flex items-center gap-2 self-end md:self-auto flex-wrap">
+          {currentUser ? (
+            <div className="relative" ref={accountMenuRef}>
+              <button
+                onClick={() => setIsAccountMenuOpen(!isAccountMenuOpen)}
+                className="flex items-center gap-2 bg-slate-950 hover:bg-slate-850 border border-slate-800 hover:border-indigo-500/50 rounded-lg px-2.5 py-1.5 transition-colors cursor-pointer"
+              >
+                {currentUser.photoURL ? (
+                  <img
+                    src={currentUser.photoURL}
+                    alt={currentUser.displayName || "Google"}
+                    className="w-5 h-5 rounded-full border border-indigo-400/40 object-cover"
+                    referrerPolicy="no-referrer"
+                  />
+                ) : (
+                  <div className="w-5 h-5 rounded-full bg-indigo-600/30 border border-indigo-500/40 flex items-center justify-center text-[10px] font-bold text-indigo-300">
+                    {currentUser.displayName ? currentUser.displayName[0].toUpperCase() : "G"}
+                  </div>
+                )}
+                <span className="text-xs font-medium text-white truncate max-w-[120px] hidden sm:inline">
+                  {currentUser.displayName || currentUser.email?.split("@")[0]}
+                </span>
+                <ChevronDown className="w-3 h-3 text-slate-400" />
+              </button>
+
+              {/* Account Switcher Dropdown */}
+              {isAccountMenuOpen && (
+                <div className="absolute right-0 mt-1.5 w-64 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl py-1 z-50 overflow-hidden">
+                  <div className="px-3 py-2 border-b border-slate-800 text-[11px] font-semibold text-slate-400 flex items-center justify-between">
+                    <span>Cuentas de Google</span>
+                    <Users className="w-3.5 h-3.5 text-slate-400" />
+                  </div>
+
+                  <div className="max-h-52 overflow-y-auto py-1">
+                    {driveSession.accounts.map((acc) => {
+                      const isActive = acc.email === currentUser.email;
+                      return (
+                        <div
+                          key={acc.email}
+                          onClick={() => handleSwitchAccount(acc)}
+                          className={`flex items-center justify-between px-3 py-2 text-xs transition-colors cursor-pointer ${
+                            isActive ? "bg-indigo-600/20 text-white" : "text-slate-300 hover:bg-slate-800"
+                          }`}
+                        >
+                          <div className="flex items-center gap-2 truncate">
+                            {acc.photoURL ? (
+                              <img
+                                src={acc.photoURL}
+                                alt=""
+                                className="w-5 h-5 rounded-full shrink-0"
+                                referrerPolicy="no-referrer"
+                              />
+                            ) : (
+                              <div className="w-5 h-5 rounded-full bg-slate-800 flex items-center justify-center text-[10px] text-slate-200 shrink-0">
+                                {acc.displayName?.[0] || "G"}
+                              </div>
+                            )}
+                            <div className="truncate text-left">
+                              <p className="font-semibold truncate">{acc.displayName || "Usuario"}</p>
+                              <p className="text-[10px] text-slate-400 font-mono truncate">{acc.email}</p>
+                            </div>
+                          </div>
+                          {isActive && <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="p-1.5 border-t border-slate-800 text-xs">
+                    <button
+                      onClick={handleSignIn}
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-slate-800 text-indigo-300 font-medium cursor-pointer"
+                    >
+                      <UserPlus className="w-3.5 h-3.5" />
+                      <span>Conectar otra cuenta</span>
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
+          ) : (
             <button
-              onClick={() => setTransferSuccessMsg(null)}
-              className="text-emerald-400 hover:text-white px-2 py-0.5 rounded cursor-pointer"
+              onClick={handleSignIn}
+              disabled={isSigningIn}
+              className="gsi-material-button text-xs"
+            >
+              <div className="gsi-material-button-icon">
+                <GoogleIcon className="w-4 h-4" />
+              </div>
+              <span className="gsi-material-button-contents">
+                {isSigningIn ? "Conectando..." : "Conectar Drive"}
+              </span>
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Global Notifications */}
+      {transferSuccessMsg && (
+        <div className="p-2.5 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span>{transferSuccessMsg}</span>
+          </div>
+          <button
+            onClick={() => setTransferSuccessMsg(null)}
+            className="text-emerald-400 hover:text-white px-1.5 py-0.5 rounded cursor-pointer"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {transferErrorMsg && (
+        <div className={`p-2.5 rounded-lg text-xs flex items-center justify-between gap-2 ${
+          isSessionExpired
+            ? "bg-amber-500/15 border border-amber-500/40 text-amber-200"
+            : "bg-rose-500/10 border border-rose-500/30 text-rose-300"
+        }`}>
+          <div className="flex items-center gap-2">
+            <AlertCircle className={`w-4 h-4 shrink-0 ${isSessionExpired ? "text-amber-400" : "text-rose-400"}`} />
+            <span>{transferErrorMsg}</span>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {isSessionExpired && (
+              <button
+                onClick={handleSignIn}
+                disabled={isSigningIn}
+                className="px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition-colors cursor-pointer"
+              >
+                Reconectar
+              </button>
+            )}
+            <button
+              onClick={() => {
+                setTransferErrorMsg(null);
+                setIsSessionExpired(false);
+              }}
+              className="text-slate-400 hover:text-white px-1.5 py-0.5 rounded cursor-pointer"
             >
               ✕
             </button>
           </div>
-        )}
-
-        {transferErrorMsg && (
-          <div className={`mt-3 p-3 rounded-xl text-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-md ${
-            isSessionExpired
-              ? "bg-amber-500/15 border border-amber-500/40 text-amber-200"
-              : "bg-rose-500/10 border border-rose-500/30 text-rose-300"
-          }`}>
-            <div className="flex items-center gap-2">
-              <AlertCircle className={`w-4 h-4 shrink-0 ${isSessionExpired ? "text-amber-400" : "text-rose-400"}`} />
-              <span>{transferErrorMsg}</span>
-            </div>
-            <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
-              {isSessionExpired && (
-                <button
-                  onClick={handleSignIn}
-                  disabled={isSigningIn}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition-colors shadow-md cursor-pointer"
-                >
-                  <GoogleIcon className="w-3.5 h-3.5" />
-                  <span>{isSigningIn ? "Reconectando..." : "Reconectar con Google"}</span>
-                </button>
-              )}
-              <button
-                onClick={() => {
-                  setTransferErrorMsg(null);
-                  setIsSessionExpired(false);
-                }}
-                className="text-slate-400 hover:text-white px-2 py-0.5 rounded cursor-pointer"
-              >
-                ✕
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* 2. Active Transfer Real-Time Progress Bar */}
       {activeTransferTask && (

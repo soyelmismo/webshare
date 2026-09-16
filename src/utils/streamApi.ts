@@ -114,7 +114,12 @@ export async function cancelStreamTask(taskId: string, accessToken?: string): Pr
 export async function recoverStreamTasksFromDrive(
   accessToken: string,
   folderId?: string
-): Promise<{ success: boolean; recoveredCount: number; tasks: StreamDriveTask[] }> {
+): Promise<{
+  success: boolean;
+  recoveredCount: number;
+  tasks: StreamDriveTask[];
+  resumedSequentialCount?: number;
+}> {
   const res = await fetch("/api/stream/recover", {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },

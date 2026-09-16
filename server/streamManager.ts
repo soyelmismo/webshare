@@ -11,6 +11,23 @@ import {
 
 export { formatBytes };
 
+async function fetchWithRetry(url: string | URL | globalThis.Request, options?: RequestInit, maxRetries = 3, initialDelay = 1000): Promise<Response> {
+  let attempt = 0;
+  while (attempt < maxRetries) {
+    const res = await fetch(url, options);
+    if (res.status === 429 || (res.status >= 500 && res.status < 600)) {
+      attempt++;
+      if (attempt >= maxRetries) return res;
+      const delay = initialDelay * Math.pow(2, attempt - 1) + Math.random() * 500;
+      console.warn(`[Drive API] HTTP ${res.status} for ${url}. Retrying in ${Math.round(delay)}ms... (Attempt ${attempt}/${maxRetries})`);
+      await new Promise(r => setTimeout(r, delay));
+    } else {
+      return res;
+    }
+  }
+  throw new Error("Unreachable");
+}
+
 const DEFAULT_TRACKERS = [
   // High-performance public UDP trackers (primary standard for global BitTorrent swarms)
   "udp://tracker.opentrackr.org:1337/announce",
@@ -299,7 +316,7 @@ export class StreamTransferManager {
           ];
           for (const url of caches) {
             try {
-              const res = await fetch(url, {
+              const res = await fetchWithRetry(url, {
                 headers: { "User-Agent": "Mozilla/5.0" },
                 signal: AbortSignal.timeout(3500),
               });
@@ -404,7 +421,7 @@ export class StreamTransferManager {
       description: `Transmitido directamente a Google Drive por Server Specs Cloud Streamer.`,
     };
 
-    const res = await fetch(
+    const res = await fetchWithRetry(
       "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,size,webViewLink",
       {
         method: "POST",
@@ -455,7 +472,7 @@ export class StreamTransferManager {
     if (existingManifestFileId) {
       // Update existing file
       try {
-        const updateRes = await fetch(
+        const updateRes = await fetchWithRetry(
           `https://www.googleapis.com/upload/drive/v3/files/${existingManifestFileId}?uploadType=media`,
           {
             method: "PATCH",
@@ -496,7 +513,7 @@ export class StreamTransferManager {
         `${delimiter}Content-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}` +
         `${delimiter}Content-Type: application/json\r\n\r\n${bodyStr}${closeDelimiter}`;
 
-      const createRes = await fetch(
+      const createRes = await fetchWithRetry(
         "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id",
         {
           method: "POST",
@@ -531,7 +548,7 @@ export class StreamTransferManager {
     fileSize: number
   ): Promise<number> {
     try {
-      const res = await fetch(sessionUri, {
+      const res = await fetchWithRetry(sessionUri, {
         method: "PUT",
         headers: {
           "Content-Length": "0",
@@ -570,16 +587,56 @@ export class StreamTransferManager {
   }): Promise<StreamDriveTask> {
     const { sourceUrl, accessToken, folderId, customChunkSizeMB, customFileName, torrentBase64 } = params;
 
-    const inspected = await this.inspectSource(sourceUrl, torrentBase64);
+    let inspected = await this.inspectSource(sourceUrl, torrentBase64);
+
+    // If it is a torrent or magnet link and the size hasn't been determined yet,
+    // resolve metadata dynamically from the swarm before starting the Drive session
+    const isTorrentSource =
+      inspected.sourceType === "torrent" ||
+      sourceUrl.startsWith("magnet:") ||
+      sourceUrl.toLowerCase().includes(".torrent") ||
+      Boolean(torrentBase64) ||
+      Boolean(inspected.infoHash);
+
+    if (isTorrentSource && (!inspected.fileSize || inspected.fileSize <= 0)) {
+      try {
+        console.log("[StreamManager] Resolviendo metadatos del torrent/magnet en la red P2P...");
+        const torrent = await this.getOrCreateTorrent(
+          inspected.torrentBase64 || torrentBase64 || sourceUrl,
+          35000,
+          inspected.torrentBase64 || torrentBase64
+        );
+        await waitForTorrentReady(torrent, 35000);
+
+        if (torrent && torrent.files && torrent.files.length > 0) {
+          const largestFile = torrent.files.reduce(
+            (a: any, b: any) => (b.length > a.length ? b : a),
+            torrent.files[0]
+          );
+          inspected.fileName = customFileName || largestFile.name || torrent.name || inspected.fileName;
+          inspected.fileSize = largestFile.length || torrent.length;
+          inspected.fileSizeFormatted = formatBytes(inspected.fileSize);
+          inspected.sourceType = "torrent";
+          if (torrent.torrentFile) {
+            inspected.torrentBase64 = torrent.torrentFile.toString("base64");
+          }
+        }
+      } catch (err: any) {
+        throw new Error(
+          `No se pudieron obtener los metadatos del torrent desde la red P2P (${err.message}). Verifica que el torrent o magnet tenga seeders activos o sube el archivo .torrent directamente.`
+        );
+      }
+    }
+
     if (!inspected.fileSize || inspected.fileSize <= 0) {
       throw new Error(
-        "No se pudo determinar el tamaño del archivo de origen. El servidor remoto debe soportar Content-Length."
+        "No se pudo determinar el tamaño del archivo de origen. Si es un enlace HTTP directo, el servidor remoto debe devolver la cabecera Content-Length. Si es un torrent, asegúrate de subir el archivo .torrent o usar un magnet con seeders activos."
       );
     }
 
     const fileName = customFileName || inspected.fileName;
     // Chunk size: multiple of 256KB (262,144 bytes). Default: 16MB.
-    const chunkMB = Math.max(4, Math.min(customChunkSizeMB || 16, 64));
+    const chunkMB = Math.max(4, Math.min(customChunkSizeMB || 64, 256));
     const chunkSizeBytes = Math.floor((chunkMB * 1024 * 1024) / 262144) * 262144;
 
     const taskId = `stream_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
@@ -817,7 +874,7 @@ export class StreamTransferManager {
             const putTimeout = AbortSignal.timeout(90000);
             const putSignal = AbortSignal.any([abortController.signal, putTimeout]);
 
-            driveRes = await fetch(task.resumableUploadUrl, {
+            driveRes = await fetchWithRetry(task.resumableUploadUrl, {
               method: "PUT",
               headers: {
                 "Content-Length": chunkLen.toString(),
@@ -860,6 +917,7 @@ export class StreamTransferManager {
         // 3. Verify response from Google Drive
         if (driveRes.status === 308) {
           // Chunk successfully committed to Google Drive
+          task.retries = 0; // Reset retries on success
           task.uploadedBytes = end;
           task.uploadedBytesFormatted = formatBytes(end);
           task.currentChunkIndex = Math.floor(end / task.chunkSizeBytes);
@@ -909,6 +967,7 @@ export class StreamTransferManager {
         } else if (driveRes.status === 200 || driveRes.status === 201) {
           // Final chunk uploaded!
           const resultData = (await driveRes.json()) as any;
+          task.retries = 0;
           task.uploadedBytes = task.fileSize;
           task.uploadedBytesFormatted = formatBytes(task.fileSize);
           task.currentChunkIndex = task.totalChunks;
@@ -961,8 +1020,29 @@ export class StreamTransferManager {
         return;
       }
       console.error("Error en streaming loop a Drive:", err);
-      task.status = "error";
-      task.error = err.message || "Error durante la transmisión de chunks";
+      
+      const maxRetries = 10;
+      task.retries = (task.retries || 0) + 1;
+      
+      if (task.retries <= maxRetries) {
+        const backoffDelay = Math.min(1000 * Math.pow(2, task.retries), 60000); // Max 60s
+        console.log(`[StreamManager] Tarea ${taskId} falló. Reintento automático ${task.retries}/${maxRetries} en ${backoffDelay}ms...`);
+        
+        task.status = "error"; // Keep UI informed of temporary error state
+        task.error = `Auto-reintento en ${Math.round(backoffDelay/1000)}s... (${task.retries}/${maxRetries}): ${err.message}`;
+        this.saveTasksToDisk();
+        
+        setTimeout(() => {
+          if (this.tasks.has(taskId) && (task.status === "error" || task.status === "paused")) {
+            this.resumeTask(taskId, accessToken || "").catch(e => {
+              console.error(`Fallo crítico al auto-reanudar ${taskId}:`, e);
+            });
+          }
+        }, backoffDelay);
+      } else {
+        task.status = "error";
+        task.error = `Límite de reintentos alcanzado (${maxRetries}). Último error: ${err.message || "Fallo durante la transmisión de chunks"}`;
+      }
     } finally {
       if (statsTimer) clearInterval(statsTimer);
       this.abortControllers.delete(taskId);
@@ -979,7 +1059,7 @@ export class StreamTransferManager {
     const timeoutSignal = AbortSignal.timeout(15000);
     const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 
-    const res = await fetch(url, {
+    const res = await fetchWithRetry(url, {
       headers: {
         Range: `bytes=${start}-${end - 1}`,
         "User-Agent": "Mozilla/5.0 (ServerSpecs Drive Streamer 1.0)",
@@ -1052,7 +1132,7 @@ export class StreamTransferManager {
             ];
             for (const c of caches) {
               try {
-                const res = await fetch(c, {
+                const res = await fetchWithRetry(c, {
                   headers: { "User-Agent": "Mozilla/5.0" },
                   signal: AbortSignal.timeout(3500),
                 });
@@ -1275,7 +1355,7 @@ export class StreamTransferManager {
     }
 
     try {
-      const res = await fetch(task.resumableUploadUrl, {
+      const res = await fetchWithRetry(task.resumableUploadUrl, {
         method: "PUT",
         headers: {
           "Content-Length": "0",
@@ -1405,6 +1485,12 @@ export class StreamTransferManager {
     const task = this.tasks.get(taskId);
     if (!task) return false;
 
+    // If already actively streaming, do not abort or restart
+    if (task.status === "streaming" && this.abortControllers.has(taskId)) {
+      console.log(`[StreamManager] Task ${taskId} is already actively streaming. No action needed.`);
+      return true;
+    }
+
     // Abort any existing controller/loop for this task
     const existingController = this.abortControllers.get(taskId);
     if (existingController) {
@@ -1467,7 +1553,7 @@ export class StreamTransferManager {
     // Attempt to delete manifest from Drive if we have access token
     if (accessToken && task.manifestFileId) {
       try {
-        await fetch(`https://www.googleapis.com/drive/v3/files/${task.manifestFileId}`, {
+        await fetchWithRetry(`https://www.googleapis.com/drive/v3/files/${task.manifestFileId}`, {
           method: "DELETE",
           headers: { Authorization: `Bearer ${accessToken}` },
           signal: AbortSignal.timeout(5000)
@@ -1483,39 +1569,73 @@ export class StreamTransferManager {
   }
 
   /**
-   * Scans a Google Drive folder for `stream_manifest_*.json` files to recover
-   * active or interrupted streaming tasks after a container restart or /tmp wipe!
+   * Scans Google Drive for `stream_manifest_*.json` files to recover
+   * active or interrupted streaming tasks after a container restart, app reload, or /tmp wipe!
+   * Automatically re-verifies live byte progress with Google Cloud and resumes streaming.
    */
   public async recoverFromDriveFolder(
     accessToken: string,
-    folderId: string
+    folderId?: string
   ): Promise<StreamDriveTask[]> {
-    const query = `name contains 'stream_manifest_' and trashed = false ${
-      folderId ? `and '${folderId}' in parents` : ""
-    }`;
+    const recoveredTasks: StreamDriveTask[] = [];
+    const seenTaskIds = new Set<string>();
 
-    const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(
-      query
-    )}&fields=files(id,name,modifiedTime)&pageSize=20`;
+    // 1. Search for stream manifests in the dedicated folder (if specified)
+    let manifestFiles: Array<{ id: string; name: string }> = [];
 
-    const res = await fetch(url, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
+    if (folderId && folderId.trim()) {
+      try {
+        const folderQuery = `name contains 'stream_manifest_' and trashed = false and '${folderId.trim()}' in parents`;
+        const folderUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(
+          folderQuery
+        )}&fields=files(id,name,modifiedTime)&pageSize=50`;
 
-    if (!res.ok) {
-      const err = await res.text();
-      if (res.status === 401 || err.includes("authError") || err.includes("Invalid Credentials")) {
-        throw new Error("Tu sesión de Google Drive ha expirado (401). Reconecta tu cuenta de Google para escanear manifiestos.");
+        const folderRes = await fetchWithRetry(folderUrl, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+
+        if (folderRes.ok) {
+          const data = (await folderRes.json()) as { files?: Array<{ id: string; name: string }> };
+          if (data.files && data.files.length > 0) {
+            manifestFiles.push(...data.files);
+          }
+        }
+      } catch (err) {
+        console.warn("[StreamManager] Error al buscar manifiestos en carpeta específica:", err);
       }
-      throw new Error(`Error al buscar manifiestos en Drive: HTTP ${res.status}`);
     }
 
-    const data = (await res.json()) as { files: Array<{ id: string; name: string }> };
-    const recoveredTasks: StreamDriveTask[] = [];
-
-    for (const file of data.files || []) {
+    // 2. Also search globally across user's Drive if fewer than 5 found
+    if (manifestFiles.length < 5) {
       try {
-        const contentRes = await fetch(
+        const globalQuery = `name contains 'stream_manifest_' and trashed = false`;
+        const globalUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(
+          globalQuery
+        )}&fields=files(id,name,modifiedTime)&pageSize=50`;
+
+        const globalRes = await fetchWithRetry(globalUrl, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+
+        if (globalRes.ok) {
+          const globalData = (await globalRes.json()) as { files?: Array<{ id: string; name: string }> };
+          if (globalData.files) {
+            for (const gf of globalData.files) {
+              if (!manifestFiles.some((f) => f.id === gf.id)) {
+                manifestFiles.push(gf);
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.warn("[StreamManager] Error al buscar manifiestos globales en Drive:", err);
+      }
+    }
+
+    // 3. Process each manifest retrieved from Google Drive
+    for (const file of manifestFiles) {
+      try {
+        const contentRes = await fetchWithRetry(
           `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`,
           {
             headers: { Authorization: `Bearer ${accessToken}` },
@@ -1524,6 +1644,22 @@ export class StreamTransferManager {
 
         if (!contentRes.ok) continue;
         const manifest = (await contentRes.json()) as StreamManifestData;
+        if (!manifest || !manifest.taskId || !manifest.resumableUploadUrl) continue;
+
+        seenTaskIds.add(manifest.taskId);
+
+        // If this task is ALREADY actively streaming in memory, do NOT pause or disturb it!
+        const existingLiveTask = this.tasks.get(manifest.taskId);
+        if (
+          existingLiveTask &&
+          (existingLiveTask.status === "streaming" || this.abortControllers.has(manifest.taskId))
+        ) {
+          console.log(
+            `[StreamManager] Recover: task ${manifest.taskId} is already actively streaming. Preserving live transfer.`
+          );
+          recoveredTasks.push(existingLiveTask);
+          continue;
+        }
 
         // Query actual bytes saved on Google Drive for this session
         const actualCommitted = await this.queryDriveSessionCommittedBytes(
@@ -1533,6 +1669,7 @@ export class StreamTransferManager {
 
         const currentChunkIndex = Math.floor(actualCommitted / manifest.chunkSizeBytes);
         const progressPercent = Math.min(100, Math.round((actualCommitted / manifest.fileSize) * 100));
+        const isFinished = actualCommitted >= manifest.fileSize;
 
         const recoveredTask: StreamDriveTask = {
           id: manifest.taskId,
@@ -1546,7 +1683,7 @@ export class StreamTransferManager {
           chunkSizeBytes: manifest.chunkSizeBytes,
           chunkSizeFormatted: `${Math.round(manifest.chunkSizeBytes / (1024 * 1024))} MB`,
           resumableUploadUrl: manifest.resumableUploadUrl,
-          driveFolderId: manifest.driveFolderId,
+          driveFolderId: manifest.driveFolderId || folderId,
           manifestFileId: file.id,
           uploadedBytes: actualCommitted,
           uploadedBytesFormatted: formatBytes(actualCommitted),
@@ -1554,9 +1691,9 @@ export class StreamTransferManager {
           totalChunks: manifest.totalChunks,
           progressPercent,
           speedMBs: 0,
-          status: actualCommitted >= manifest.fileSize ? "completed" : "paused",
+          status: isFinished ? "completed" : "paused",
           startedAt: manifest.startedAt,
-          completedAt: manifest.status === "completed" ? manifest.updatedAt : undefined,
+          completedAt: isFinished ? manifest.updatedAt || Date.now() : undefined,
           finalDriveFileId: manifest.finalDriveFileId,
           md5Checksum: manifest.md5Checksum,
         };
@@ -1564,11 +1701,61 @@ export class StreamTransferManager {
         this.tasks.set(manifest.taskId, recoveredTask);
         recoveredTasks.push(recoveredTask);
       } catch (manifestErr) {
-        console.warn("No se pudo parsear manifiesto en Drive:", file.name, manifestErr);
+        console.warn("[StreamManager] No se pudo parsear manifiesto en Drive:", file.name, manifestErr);
+      }
+    }
+
+    // 4. Also scan any existing tasks in memory/disk that weren't in manifests
+    for (const [taskId, localTask] of this.tasks.entries()) {
+      if (seenTaskIds.has(taskId)) continue;
+      if (localTask.status === "completed") continue;
+
+      // If already streaming in memory, do not pause or disturb it!
+      if (localTask.status === "streaming" && this.abortControllers.has(taskId)) {
+        recoveredTasks.push(localTask);
+        continue;
+      }
+
+      if (localTask.resumableUploadUrl && localTask.fileSize > 0) {
+        try {
+          const committed = await this.queryDriveSessionCommittedBytes(
+            localTask.resumableUploadUrl,
+            localTask.fileSize
+          );
+
+          if (committed >= localTask.fileSize) {
+            localTask.uploadedBytes = localTask.fileSize;
+            localTask.uploadedBytesFormatted = formatBytes(localTask.fileSize);
+            localTask.currentChunkIndex = localTask.totalChunks;
+            localTask.progressPercent = 100;
+            localTask.status = "completed";
+          } else {
+            localTask.uploadedBytes = committed;
+            localTask.uploadedBytesFormatted = formatBytes(committed);
+            localTask.currentChunkIndex = Math.floor(committed / localTask.chunkSizeBytes);
+            localTask.progressPercent = Math.min(99, Math.round((committed / localTask.fileSize) * 100));
+            localTask.status = "paused";
+          }
+          recoveredTasks.push(localTask);
+        } catch (e) {
+          console.warn(`[StreamManager] Error verificando sesión en Drive para tarea local ${taskId}:`, e);
+        }
       }
     }
 
     this.saveTasksToDisk();
+
+    // 5. Automatically resume only tasks that are NOT already active/streaming
+    for (const task of recoveredTasks) {
+      if (task.status !== "completed" && task.uploadedBytes < task.fileSize) {
+        if (!this.abortControllers.has(task.id) && task.status !== "streaming") {
+          this.resumeTask(task.id, accessToken).catch((err) => {
+            console.warn(`[StreamManager] Auto-reanudación falló para tarea recuperada ${task.id}:`, err);
+          });
+        }
+      }
+    }
+
     return recoveredTasks;
   }
 }

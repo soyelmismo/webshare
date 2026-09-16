@@ -344,6 +344,7 @@ export interface StreamDriveTask {
   status: "idle" | "initializing" | "streaming" | "paused" | "completed" | "error";
   statusText?: string;
   error?: string;
+  retries?: number;
   md5Checksum?: string;
   finalDriveFileId?: string;
   webViewLink?: string;

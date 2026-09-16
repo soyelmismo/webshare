@@ -1,5 +1,27 @@
 import { ServerFsListResponse, TransferTask } from "../types";
 
+async function parseJsonResponse<T>(res: Response, fallbackErrorMsg: string): Promise<T> {
+  const contentType = res.headers.get("content-type") || "";
+  if (!res.ok) {
+    if (contentType.includes("application/json")) {
+      try {
+        const err = await res.json();
+        throw new Error(err.error || `${fallbackErrorMsg} (HTTP ${res.status})`);
+      } catch (e: any) {
+        throw new Error(e.message || `${fallbackErrorMsg} (HTTP ${res.status})`);
+      }
+    } else {
+      throw new Error(`${fallbackErrorMsg} (HTTP ${res.status})`);
+    }
+  }
+
+  if (!contentType.includes("application/json")) {
+    throw new Error("El servidor devolvió una respuesta no JSON inesperada.");
+  }
+
+  return await res.json();
+}
+
 export async function fetchServerFiles(
   dir?: string,
   flatten: boolean = false
@@ -9,11 +31,7 @@ export async function fetchServerFiles(
   if (flatten) params.set("flatten", "true");
 
   const res = await fetch(`/api/fs/server/list?${params.toString()}`);
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-    throw new Error(err.error || `Error ${res.status} al listar archivos del servidor`);
-  }
-  return await res.json();
+  return await parseJsonResponse<ServerFsListResponse>(res, "Error al listar archivos del servidor");
 }
 
 export async function deleteServerFiles(
@@ -24,11 +42,10 @@ export async function deleteServerFiles(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ paths }),
   });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-    throw new Error(err.error || `Error ${res.status} al eliminar del servidor`);
-  }
-  return await res.json();
+  return await parseJsonResponse<{ success: boolean; deletedCount: number; deleted: string[]; errors: string[] }>(
+    res,
+    "Error al eliminar archivos del servidor"
+  );
 }
 
 export async function renameServerFile(
@@ -40,11 +57,10 @@ export async function renameServerFile(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ oldPath, newName }),
   });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-    throw new Error(err.error || `Error ${res.status} al renombrar en el servidor`);
-  }
-  return await res.json();
+  return await parseJsonResponse<{ success: boolean; oldPath: string; newPath: string; newName: string }>(
+    res,
+    "Error al renombrar archivo en el servidor"
+  );
 }
 
 export async function transferServerToDrive(
@@ -65,17 +81,22 @@ export async function transferServerToDrive(
       mode,
     }),
   });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-    throw new Error(err.error || `Error ${res.status} al iniciar transferencia`);
-  }
-  return await res.json();
+  return await parseJsonResponse<{ success: boolean; transfer: TransferTask }>(
+    res,
+    "Error al iniciar transferencia a Google Drive"
+  );
 }
 
 export async function fetchActiveTransfers(): Promise<TransferTask[]> {
-  const res = await fetch("/api/fs/server/transfers");
-  if (!res.ok) return [];
-  return await res.json();
+  try {
+    const res = await fetch("/api/fs/server/transfers");
+    if (!res.ok) return [];
+    const contentType = res.headers.get("content-type") || "";
+    if (!contentType.includes("application/json")) return [];
+    return await res.json();
+  } catch {
+    return [];
+  }
 }
 
 export async function copyFromDriveToServer(
@@ -94,9 +115,8 @@ export async function copyFromDriveToServer(
       targetDir,
     }),
   });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-    throw new Error(err.error || `Error ${res.status} al copiar de Google Drive al servidor`);
-  }
-  return await res.json();
+  return await parseJsonResponse<{ success: boolean; transfer: TransferTask }>(
+    res,
+    "Error al copiar desde Google Drive al servidor"
+  );
 }

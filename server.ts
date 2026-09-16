@@ -11,6 +11,13 @@ import { Readable } from "stream";
 import { createServer as createViteServer } from "vite";
 import { streamManager } from "./server/streamManager";
 import { sequentialChunkEngine } from "./server/sequentialEngine";
+import {
+  createThrottledByteStream,
+  streamThrottledBytesToResponse,
+  testServerBackboneSpeed,
+  BACKBONE_SERVERS,
+  benchmarkAllBackboneServers,
+} from "./server/speedTestEngine";
 
 // Background rolling history buffer for server real-time charts
 interface HistoryPoint {
@@ -652,6 +659,131 @@ if (!fs.existsSync(SEQUENTIAL_BASE_DIR)) fs.mkdirSync(SEQUENTIAL_BASE_DIR, { rec
     res.json({ pong: true, status: "ok", time: Date.now() });
   });
 
+  // ==========================================================
+  // RAW SPEED TEST & BANDWIDTH LIMITER API
+  // ==========================================================
+
+  // 1. Ultra-fast ping / jitter measurement endpoint
+  app.get("/api/speedtest/ping", (req, res) => {
+    res.set({
+      "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+      "Pragma": "no-cache",
+      "Expires": "0",
+    });
+    res.json({
+      pong: true,
+      timestamp: Date.now(),
+      hrtime: process.hrtime.bigint().toString(),
+    });
+  });
+
+  // 2. Raw streaming download endpoint with precision bandwidth throttling
+  app.get("/api/speedtest/download", (req, res) => {
+    const limitMbps = Math.max(0, parseFloat(req.query.limitMbps as string) || 0);
+    const sizeMB = Math.max(1, Math.min(1000, parseFloat(req.query.sizeMB as string) || 50));
+    const durationSec = Math.max(1, Math.min(120, parseFloat(req.query.durationSec as string) || 15));
+    const totalBytes = Math.round(sizeMB * 1024 * 1024);
+
+    res.set({
+      "Content-Type": "application/octet-stream",
+      "Content-Length": totalBytes.toString(),
+      "Content-Disposition": "attachment; filename=raw_speedtest.bin",
+      "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+      "Pragma": "no-cache",
+      "Expires": "0",
+      "X-Throttled-Mbps": limitMbps.toString(),
+      "X-Target-Size-MB": sizeMB.toString(),
+    });
+
+    const stream = createThrottledByteStream(totalBytes, limitMbps, durationSec);
+
+    req.on("close", () => {
+      stream.destroy();
+    });
+
+    stream.on("error", (err) => {
+      console.warn("[SpeedTest] Download stream error:", err.message);
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Fallo en el flujo de descarga" });
+      }
+    });
+
+    stream.pipe(res);
+  });
+
+  // 3. Raw upload receiver endpoint with metrics calculation
+  app.post("/api/speedtest/upload", async (req, res) => {
+    const startTime = Date.now();
+    let receivedBytes = 0;
+    const limitMbps = Math.max(0, parseFloat(req.query.limitMbps as string) || 0);
+    const targetBytesPerSec = limitMbps > 0 ? (limitMbps * 1_000_000) / 8 : 0;
+
+    try {
+      req.on("data", async (chunk: Buffer) => {
+        receivedBytes += chunk.length;
+        // Server side pacing if requested
+        if (targetBytesPerSec > 0) {
+          const elapsedSec = (Date.now() - startTime) / 1000;
+          const expectedSec = receivedBytes / targetBytesPerSec;
+          if (expectedSec > elapsedSec) {
+            const delayMs = (expectedSec - elapsedSec) * 1000;
+            if (delayMs > 10) {
+              req.pause();
+              setTimeout(() => req.resume(), Math.min(delayMs, 50));
+            }
+          }
+        }
+      });
+
+      req.on("end", () => {
+        const elapsedSec = Math.max(0.001, (Date.now() - startTime) / 1000);
+        const speedMBs = Number((receivedBytes / (1024 * 1024) / elapsedSec).toFixed(2));
+        const speedMbps = Number(((receivedBytes * 8) / 1_000_000 / elapsedSec).toFixed(2));
+
+        res.json({
+          status: "completed",
+          receivedBytes,
+          receivedMB: Number((receivedBytes / (1024 * 1024)).toFixed(2)),
+          elapsedSec: Number(elapsedSec.toFixed(3)),
+          speedMBs,
+          speedMbps,
+          throttledLimitMbps: limitMbps > 0 ? limitMbps : undefined,
+        });
+      });
+
+      req.on("error", (err) => {
+        console.warn("[SpeedTest] Upload error:", err.message);
+        if (!res.headersSent) {
+          res.status(500).json({ error: "Fallo durante la subida", details: err.message });
+        }
+      });
+    } catch (e: any) {
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Error en el test de subida", details: e.message });
+      }
+    }
+  });
+
+  // 4. Server-to-Internet CDN Backbone speed test
+  app.post("/api/speedtest/backbone", async (req, res) => {
+    try {
+      const {
+        limitMbps = 0,
+        sizeMB = 50,
+        sourceUrl = "https://speed.cloudflare.com/__down?bytes=50000000",
+      } = req.body || {};
+
+      const maxBytes = Math.max(1, Math.min(250, Number(sizeMB) || 50)) * 1024 * 1024;
+      const targetLimit = Math.max(0, Number(limitMbps) || 0);
+
+      const result = await testServerBackboneSpeed(sourceUrl, targetLimit, maxBytes);
+      res.json(result);
+    } catch (err: any) {
+      console.error("[SpeedTest] Backbone test error:", err);
+      res.status(500).json({ error: "Fallo en el test de red troncal", details: err?.message });
+    }
+  });
+
   // Proxy endpoint to download external files avoiding browser CORS issues
   app.get("/api/download/proxy", async (req, res) => {
     const targetUrl = req.query.url as string;
@@ -1126,9 +1258,15 @@ if (!fs.existsSync(SEQUENTIAL_BASE_DIR)) fs.mkdirSync(SEQUENTIAL_BASE_DIR, { rec
 
   const serverTransfers = new Map<string, ServerFsTransfer>();
 
+  const ZERO_DISK_BASE_DIR = path.join(os.tmpdir(), "zero_disk_downloads");
+  if (!fs.existsSync(ZERO_DISK_BASE_DIR)) {
+    try { fs.mkdirSync(ZERO_DISK_BASE_DIR, { recursive: true }); } catch (e) {}
+  }
+
   // Base roots allowed for exploration and operations
   const ALLOWED_ROOTS = [
     { name: "Descargas Secuenciales", path: path.resolve(SEQUENTIAL_BASE_DIR) },
+    { name: "Descargas en Streaming", path: path.resolve(ZERO_DISK_BASE_DIR) },
     { name: "Directorio Temporal (/tmp)", path: path.resolve("/tmp") },
   ];
 
@@ -1741,9 +1879,114 @@ if (!fs.existsSync(SEQUENTIAL_BASE_DIR)) fs.mkdirSync(SEQUENTIAL_BASE_DIR, { rec
       const { accessToken, folderId } = req.body;
       if (!accessToken) return res.status(400).json({ error: "Falta 'accessToken'" });
       const recovered = await streamManager.recoverFromDriveFolder(accessToken, folderId || "");
-      res.json({ success: true, recoveredCount: recovered.length, tasks: recovered });
+      const resumedSequential = sequentialChunkEngine.autoResumePendingJobs(accessToken, folderId || "");
+      res.json({
+        success: true,
+        recoveredCount: recovered.length,
+        tasks: recovered,
+        resumedSequentialCount: resumedSequential.length,
+      });
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Error al recuperar tareas desde Drive" });
+    }
+  });
+
+  // --- RAW SPEED TEST WITH BANDWIDTH THROTTLER ENDPOINTS ---
+  app.get("/api/speedtest/ping", (req, res) => {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+    res.json({ status: "ok", timestamp: Date.now() });
+  });
+
+  app.get("/api/speedtest/download", async (req, res) => {
+    try {
+      const limitMbps = parseFloat(req.query.limitMbps as string) || 0;
+      const sizeMB = parseFloat(req.query.sizeMB as string) || 50;
+      const durationSec = parseFloat(req.query.durationSec as string) || 15;
+
+      const totalBytes = Math.round(sizeMB * 1024 * 1024);
+
+      res.setHeader("Content-Type", "application/octet-stream");
+      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Pragma", "no-cache");
+      res.setHeader("Expires", "0");
+      res.setHeader("X-Target-Bytes", totalBytes.toString());
+
+      await streamThrottledBytesToResponse(res, req, totalBytes, limitMbps, durationSec);
+    } catch (err: any) {
+      console.error("Error in download speed test:", err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: err.message || "Error al procesar stream de bajada" });
+      } else if (!res.writableEnded) {
+        res.end();
+      }
+    }
+  });
+
+  app.post("/api/speedtest/upload", (req, res) => {
+    const startTime = Date.now();
+    let receivedBytes = 0;
+
+    req.on("data", (chunk: Buffer) => {
+      receivedBytes += chunk.length;
+    });
+
+    req.on("end", () => {
+      const elapsedSec = Math.max(0.001, (Date.now() - startTime) / 1000);
+      const speedMbps = Number(((receivedBytes * 8) / 1_000_000 / elapsedSec).toFixed(2));
+      const speedMBs = Number((receivedBytes / (1024 * 1024) / elapsedSec).toFixed(2));
+
+      res.json({
+        success: true,
+        receivedBytes,
+        elapsedSec: Number(elapsedSec.toFixed(3)),
+        speedMbps,
+        speedMBs,
+      });
+    });
+
+    req.on("error", (err) => {
+      console.error("Speedtest upload error:", err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: err.message || "Error en el stream de subida" });
+      }
+    });
+  });
+
+  app.get("/api/speedtest/servers", (_req, res) => {
+    res.json({ servers: BACKBONE_SERVERS });
+  });
+
+  app.post("/api/speedtest/benchmark-servers", async (req, res) => {
+    try {
+      const { sizeMB, durationSec } = req.body || {};
+      const size = typeof sizeMB === "number" && sizeMB > 0 ? sizeMB : 25;
+      const duration = typeof durationSec === "number" && durationSec > 0 ? durationSec : 5;
+      const benchmarkResults = await benchmarkAllBackboneServers(size, duration);
+      res.json({
+        timestamp: Date.now(),
+        results: benchmarkResults,
+      });
+    } catch (err: any) {
+      console.error("Benchmark all servers error:", err);
+      res.status(500).json({ error: err.message || "Error al benchmarkear servidores troncales" });
+    }
+  });
+
+  app.post("/api/speedtest/backbone", async (req, res) => {
+    try {
+      const { limitMbps, sizeMB, sourceUrl } = req.body || {};
+      const limit = typeof limitMbps === "number" ? limitMbps : 0;
+      const bytes = (typeof sizeMB === "number" && sizeMB > 0 ? sizeMB : 50) * 1024 * 1024;
+      const url = sourceUrl || "https://speed.cloudflare.com/__down?bytes=50000000";
+
+      const result = await testServerBackboneSpeed(url, limit, bytes);
+      res.json(result);
+    } catch (err: any) {
+      console.error("Backbone speed test error:", err);
+      res.status(500).json({ error: err.message || "Error al medir red troncal del servidor" });
     }
   });
 

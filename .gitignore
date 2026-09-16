@@ -6,3 +6,4 @@ coverage/
 *.log
 .env*
 !.env.example
+.stream_tasks_cache.json

@@ -393,11 +393,12 @@ export async function inspectAnySource(
       try {
         const res = await fetch(trimmed, {
           headers: { "User-Agent": "Mozilla/5.0 (ServerSpecs Torrent Inspector 1.0)" },
-          signal: AbortSignal.timeout(7000),
+          signal: AbortSignal.timeout(8000),
         });
         if (res.ok) {
           const buf = Buffer.from(await res.arrayBuffer());
           const parsed = parseTorrentBuffer(buf);
+          parsed.torrentBase64 = buf.toString("base64");
           if (parsed.webSeeds && parsed.webSeeds.length > 0) {
             parsed.activeMirrorUrl = (await findFastestWebSeedMirror(parsed.webSeeds)) || undefined;
           }
@@ -434,11 +435,14 @@ export async function inspectAnySource(
 
 /**
  * Inspects a direct HTTP/HTTPS URL with strict timeout guards.
+ * Automatically identifies if the URL returns a .torrent file or binary download.
  */
 export async function inspectDirectHttpUrl(url: string): Promise<InspectedFileInfo> {
   let fileSize = 0;
   let acceptRanges = false;
   let fileName = "";
+  let isTorrentResponse = false;
+  let torrentBuf: Buffer | null = null;
 
   // Extract fallback name from URL first
   try {
@@ -459,6 +463,15 @@ export async function inspectDirectHttpUrl(url: string): Promise<InspectedFileIn
       signal: AbortSignal.timeout(6000),
     });
 
+    const cType = (headRes.headers.get("content-type") || "").toLowerCase();
+    if (
+      cType.includes("application/x-bittorrent") ||
+      cType.includes("application/x-torrent") ||
+      cType.includes("torrent")
+    ) {
+      isTorrentResponse = true;
+    }
+
     // Content disposition header
     const cd = headRes.headers.get("content-disposition");
     if (cd) {
@@ -469,6 +482,9 @@ export async function inspectDirectHttpUrl(url: string): Promise<InspectedFileIn
         } catch {
           fileName = match[1].trim();
         }
+      }
+      if (fileName.toLowerCase().endsWith(".torrent")) {
+        isTorrentResponse = true;
       }
     }
 
@@ -483,10 +499,64 @@ export async function inspectDirectHttpUrl(url: string): Promise<InspectedFileIn
       acceptRanges = true;
     }
   } catch (err) {
-    // HEAD failed, will try Range GET
+    // HEAD failed, will try Range/GET
   }
 
-  // 2. If fileSize not found, try Range GET of 1 byte with 6s timeout
+  // If detected as torrent or fileSize is very small (< 2MB) or not found, try quick GET
+  if (isTorrentResponse || fileSize === 0 || (fileSize > 0 && fileSize < 2 * 1024 * 1024)) {
+    try {
+      const getRes = await fetch(url, {
+        method: "GET",
+        headers: {
+          "User-Agent": "Mozilla/5.0 (ServerSpecs Drive Streamer 1.0)",
+        },
+        signal: AbortSignal.timeout(7000),
+      });
+
+      const cType = (getRes.headers.get("content-type") || "").toLowerCase();
+      const cd = getRes.headers.get("content-disposition");
+      if (cd && !fileName) {
+        const match = cd.match(/filename\*?=['"]?(?:UTF-\d['"]*)?([^;\r\n"']*)['"]?/i);
+        if (match && match[1]) {
+          try {
+            fileName = decodeURIComponent(match[1].trim());
+          } catch {
+            fileName = match[1].trim();
+          }
+        }
+      }
+
+      if (getRes.ok) {
+        const arrayBuf = await getRes.arrayBuffer();
+        const buf = Buffer.from(arrayBuf);
+        // Check if buffer starts with bencode dict "d" (ASCII 100) and contains bencode keys
+        if (
+          buf.length > 20 &&
+          buf[0] === 100 &&
+          (buf.includes("8:announce") || buf.includes("4:info") || buf.includes("13:announce-list"))
+        ) {
+          try {
+            const parsed = parseTorrentBuffer(buf);
+            parsed.torrentBase64 = buf.toString("base64");
+            if (parsed.webSeeds && parsed.webSeeds.length > 0) {
+              parsed.activeMirrorUrl = (await findFastestWebSeedMirror(parsed.webSeeds)) || undefined;
+            }
+            return parsed;
+          } catch {
+            // Not a valid torrent bencode, continue normal HTTP
+          }
+        }
+
+        if (!fileSize) {
+          fileSize = buf.length;
+        }
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  // 2. If fileSize still not found, try Range GET of 1 byte with 6s timeout
   if (fileSize <= 0) {
     try {
       const rangeRes = await fetch(url, {
@@ -516,20 +586,8 @@ export async function inspectDirectHttpUrl(url: string): Promise<InspectedFileIn
           fileSize = parseInt(cl, 10);
         }
       }
-
-      const cd = rangeRes.headers.get("content-disposition");
-      if (cd && !fileName) {
-        const match = cd.match(/filename\*?=['"]?(?:UTF-\d['"]*)?([^;\r\n"']*)['"]?/i);
-        if (match && match[1]) {
-          try {
-            fileName = decodeURIComponent(match[1].trim());
-          } catch {
-            fileName = match[1].trim();
-          }
-        }
-      }
     } catch {
-      // Ignore network failure, use fallback
+      // Ignore network failure
     }
   }
 

@@ -246,8 +246,12 @@ export const DriveDownloadClient: React.FC<DriveDownloadClientProps> = ({
         setDriveSession(loadDriveSession());
       }
     } catch (err: any) {
-      console.error("Sign-in failed:", err);
-      setAuthError(err?.message || "Error al autenticar con Google.");
+      if (err?.message?.includes("popup-closed-by-user")) {
+        console.warn("Sign-in cancelled by user.");
+      } else {
+        console.error("Sign-in failed:", err);
+        setAuthError(err?.message || "Error al autenticar con Google.");
+      }
     } finally {
       setIsSigningIn(false);
     }
@@ -269,8 +273,12 @@ export const DriveDownloadClient: React.FC<DriveDownloadClientProps> = ({
         loadFolderAndFiles(result.accessToken);
       }
     } catch (err: any) {
-      console.error("Error al agregar cuenta:", err);
-      setAuthError(err?.message || "Error al agregar cuenta de Google.");
+      if (err?.message?.includes("popup-closed-by-user")) {
+        console.warn("Sign-in cancelled by user (Add Account).");
+      } else {
+        console.error("Error al agregar cuenta:", err);
+        setAuthError(err?.message || "Error al agregar cuenta de Google.");
+      }
     } finally {
       setIsSigningIn(false);
     }
@@ -822,284 +830,196 @@ export const DriveDownloadClient: React.FC<DriveDownloadClientProps> = ({
   const totalFolderBytes = files.reduce((acc, f) => acc + (parseInt(f.size || "0", 10) || 0), 0);
 
   return (
-    <div className="space-y-6 animate-in fade-in duration-300">
-      {/* 1. Header Banner: Google Drive Connection Status */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl relative overflow-hidden">
-        <div className="absolute top-0 right-0 -mt-8 -mr-8 w-48 h-48 bg-indigo-600/10 rounded-full blur-3xl pointer-events-none" />
-
-        <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 relative z-10">
-          <div className="flex items-start gap-3.5">
-            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-500/20 to-blue-500/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shadow-lg shadow-indigo-950/50 shrink-0">
-              <CloudDownload className="w-6 h-6 text-indigo-400" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2 flex-wrap">
-                <h2 className="text-base font-bold text-white tracking-tight">
-                  Cliente de Descarga • Google Drive
-                </h2>
-                <span className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 flex items-center gap-1.5 font-mono">
-                  <FolderOpen className="w-3 h-3 text-indigo-400" />
-                  Carpeta Dedicada: {folderName}
-                </span>
-              </div>
-              <p className="text-xs text-slate-400 mt-1 max-w-2xl">
-                Descarga archivos web desde cualquier URL, guarda informes de diagnóstico del servidor o transfiere documentos directamente a una carpeta dedicada y organizada en tu Google Drive.
-              </p>
-            </div>
+    <div className="space-y-4">
+      {/* 1. Compact Header Banner */}
+      <div className="bg-slate-900 border border-slate-800/80 rounded-xl p-3.5 flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 shrink-0">
+            <CloudDownload className="w-5 h-5" />
           </div>
-
-          {/* Auth Controls & Cookie Persistence */}
-          <div className="flex items-center gap-2.5 self-end md:self-auto flex-wrap justify-end">
-            {onNavigateToCommander && (
-              <button
-                onClick={onNavigateToCommander}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/40 text-xs font-semibold text-indigo-300 hover:text-white transition-all cursor-pointer shadow-md"
-                title="Abrir File Commander con doble panel para gestionar archivos en servidor y Drive"
-              >
-                <Columns2 className="w-3.5 h-3.5 text-indigo-400" />
-                <span className="hidden sm:inline">File Commander</span>
-              </button>
-            )}
-
-            {/* Client-Sided Cookie & Storage Status Button */}
-            <button
-              onClick={() => setIsCookieModalOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-950/80 hover:bg-slate-800/80 border border-slate-800 hover:border-amber-500/40 text-xs font-semibold text-slate-200 transition-all cursor-pointer shadow-md"
-              title="Administrar Cookies y persistencia permanente de Google Drive"
-            >
-              <Cookie className="w-3.5 h-3.5 text-amber-400" />
-              <span className="hidden sm:inline">Cookies & Token</span>
-              <span
-                className={`w-2 h-2 rounded-full ${
-                  currentUser ? "bg-emerald-400 animate-pulse" : "bg-slate-600"
-                }`}
-              />
-            </button>
-
-            {isAuthLoading ? (
-              <div className="flex items-center gap-2 px-4 py-2 bg-slate-800/80 rounded-xl text-xs text-slate-400">
-                <Loader2 className="w-4 h-4 animate-spin text-indigo-400" />
-                <span>Verificando sesión...</span>
-              </div>
-            ) : currentUser ? (
-              <div className="relative" ref={accountMenuRef}>
-                <button
-                  onClick={() => setIsAccountMenuOpen(!isAccountMenuOpen)}
-                  className="flex items-center gap-2.5 bg-slate-950/90 hover:bg-slate-900 border border-slate-800 hover:border-indigo-500/50 rounded-xl px-3 py-1.5 transition-all cursor-pointer shadow-md"
-                  title="Cambiar o gestionar cuentas de Google"
-                >
-                  {currentUser.photoURL ? (
-                    <img
-                      src={currentUser.photoURL}
-                      alt={currentUser.displayName || "Usuario"}
-                      className="w-7 h-7 rounded-full border border-indigo-500/40 shrink-0"
-                      referrerPolicy="no-referrer"
-                    />
-                  ) : (
-                    <div className="w-7 h-7 rounded-full bg-indigo-600 text-white flex items-center justify-center text-xs font-bold shrink-0">
-                      {currentUser.displayName?.[0] || "U"}
-                    </div>
-                  )}
-                  <div className="text-left leading-tight hidden sm:block">
-                    <div className="flex items-center gap-1.5">
-                      <p className="text-xs font-bold text-white truncate max-w-[120px]">
-                        {currentUser.displayName || "Google User"}
-                      </p>
-                      {driveSession.accounts.length > 1 && (
-                        <span className="px-1.5 py-0.2 rounded-full text-[9px] bg-indigo-500/20 text-indigo-300 font-mono font-semibold">
-                          {driveSession.accounts.length}
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-[10px] text-slate-400 truncate max-w-[120px] font-mono">
-                      {currentUser.email}
-                    </p>
-                  </div>
-                  <ChevronDown
-                    className={`w-3.5 h-3.5 text-slate-400 transition-transform duration-200 ${
-                      isAccountMenuOpen ? "rotate-180 text-indigo-400" : ""
-                    }`}
-                  />
-                </button>
-
-                {/* Multi-Account Dropdown Menu */}
-                {isAccountMenuOpen && (
-                  <div className="absolute right-0 mt-2 w-72 rounded-2xl bg-slate-900 border border-slate-800 shadow-2xl z-50 overflow-hidden animate-in fade-in slide-in-from-top-2 duration-150">
-                    <div className="p-3 border-b border-slate-800 bg-slate-950/60 flex items-center justify-between">
-                      <div className="flex items-center gap-1.5 text-xs font-bold text-white uppercase tracking-wider">
-                        <Users className="w-3.5 h-3.5 text-indigo-400" />
-                        <span>Cuentas Vinculadas ({driveSession.accounts.length})</span>
-                      </div>
-                      <button
-                        onClick={handleAddAnotherAccount}
-                        className="text-[11px] text-indigo-400 hover:text-indigo-300 font-semibold flex items-center gap-1 cursor-pointer"
-                        title="Agregar otra cuenta de Google"
-                      >
-                        <UserPlus className="w-3 h-3" />
-                        <span>+ Agregar</span>
-                      </button>
-                    </div>
-
-                    <div className="max-h-60 overflow-y-auto p-1.5 space-y-1">
-                      {driveSession.accounts.map((acc) => {
-                        const isActive =
-                          acc.id === (currentUser.email || currentUser.uid) ||
-                          acc.email === currentUser.email;
-
-                        return (
-                          <div
-                            key={acc.id}
-                            onClick={() => {
-                              if (!isActive) handleSwitchAccount(acc.id);
-                            }}
-                            className={`p-2 rounded-xl flex items-center justify-between gap-2 transition-colors ${
-                              isActive
-                                ? "bg-indigo-600/15 border border-indigo-500/30 text-white"
-                                : "hover:bg-slate-800/80 text-slate-300 cursor-pointer"
-                            }`}
-                          >
-                            <div className="flex items-center gap-2.5 min-w-0">
-                              {acc.photoURL ? (
-                                <img
-                                  src={acc.photoURL}
-                                  alt=""
-                                  className="w-7 h-7 rounded-full object-cover shrink-0"
-                                  referrerPolicy="no-referrer"
-                                />
-                              ) : (
-                                <div className="w-7 h-7 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-xs font-bold text-slate-200 shrink-0">
-                                  {acc.displayName ? acc.displayName[0].toUpperCase() : "G"}
-                                </div>
-                              )}
-                              <div className="min-w-0">
-                                <p className="text-xs font-semibold truncate leading-tight">
-                                  {acc.displayName || "Usuario"}
-                                </p>
-                                <p className="text-[10px] text-slate-400 truncate font-mono">
-                                  {acc.email}
-                                </p>
-                              </div>
-                            </div>
-
-                            <div className="flex items-center gap-1.5 shrink-0">
-                              {isActive ? (
-                                <div className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-mono">
-                                  <Check className="w-3 h-3 text-emerald-400" />
-                                  <span>Activa</span>
-                                </div>
-                              ) : (
-                                <span className="text-[10px] text-slate-400 font-mono">
-                                  Cambiar
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-
-                    <div className="p-2 border-t border-slate-800 bg-slate-950/80 space-y-1 text-xs">
-                      <button
-                        onClick={handleAddAnotherAccount}
-                        className="w-full flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-slate-800 text-indigo-300 font-semibold transition-colors cursor-pointer text-left"
-                      >
-                        <UserPlus className="w-3.5 h-3.5 text-indigo-400" />
-                        <span>Conectar otra cuenta Google</span>
-                      </button>
-
-                      <button
-                        onClick={() => {
-                          setIsAccountMenuOpen(false);
-                          setIsCookieModalOpen(true);
-                        }}
-                        className="w-full flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-slate-800 text-amber-300 font-semibold transition-colors cursor-pointer text-left"
-                      >
-                        <Cookie className="w-3.5 h-3.5 text-amber-400" />
-                        <span>Administrar Cookies & Tokens</span>
-                      </button>
-
-                      <button
-                        onClick={handleLogout}
-                        className="w-full flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-rose-500/10 text-rose-300 transition-colors cursor-pointer text-left"
-                      >
-                        <LogOut className="w-3.5 h-3.5 text-rose-400" />
-                        <span>Cerrar sesión activa</span>
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            ) : (
-              /* Official Google Sign-In Button as required by Workspace Skill */
-              <button
-                onClick={handleSignIn}
-                disabled={isSigningIn}
-                className="gsi-material-button"
-                title="Iniciar sesión con Google para acceder a tu Drive"
-              >
-                <div className="gsi-material-button-icon">
-                  <GoogleIcon className="w-5 h-5" />
-                </div>
-                <span className="gsi-material-button-contents">
-                  {isSigningIn ? "Conectando..." : "Iniciar sesión con Google"}
-                </span>
-              </button>
-            )}
+          <div>
+            <div className="flex items-center gap-2">
+              <h2 className="text-sm font-bold text-white">Google Drive</h2>
+              <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 flex items-center gap-1">
+                <FolderOpen className="w-3 h-3 text-indigo-400" />
+                {folderName}
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-400">
+              Descarga directa a Drive, subida de archivos locales y explorador sincronizado.
+            </p>
           </div>
         </div>
 
-        {authError && (
-          <div className="mt-4 p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl text-xs text-rose-300 flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
-            <span>{authError}</span>
-          </div>
-        )}
+        {/* Auth Controls & Cookie Persistence */}
+        <div className="flex items-center gap-2 self-end md:self-auto flex-wrap">
+          {onNavigateToCommander && (
+            <button
+              onClick={onNavigateToCommander}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-indigo-600/15 hover:bg-indigo-600/25 border border-indigo-500/30 text-xs font-semibold text-indigo-300 hover:text-white transition-colors cursor-pointer"
+            >
+              <Columns2 className="w-3.5 h-3.5" />
+              <span>Commander</span>
+            </button>
+          )}
 
-        {/* Dedicated Folder Status Banner when connected */}
-        {currentUser && folderInfo && (
-          <div className="mt-4 pt-4 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
-            <div className="flex items-center gap-2 text-slate-300 flex-wrap">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
-              <span>Cuenta Activa:</span>
-              <strong className="text-emerald-300 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-800/40">
-                {currentUser.email}
-              </strong>
-              <span className="text-slate-500">•</span>
-              <span>Carpeta en Drive:</span>
-              <strong className="text-indigo-300 bg-indigo-950/60 px-2 py-0.5 rounded border border-indigo-800/40">
-                📁 {folderInfo.name}
-              </strong>
-              <span className="text-slate-500">•</span>
-              <span className="text-slate-400">{files.length} archivo(s) guardado(s)</span>
-              <span className="text-slate-500">•</span>
-              <span className="text-slate-400">Total: {(totalFolderBytes / (1024 * 1024)).toFixed(2)} MB</span>
+          <button
+            onClick={() => setIsCookieModalOpen(true)}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 hover:border-amber-500/40 text-xs text-slate-300 transition-colors cursor-pointer"
+          >
+            <Cookie className="w-3.5 h-3.5 text-amber-400" />
+            <span>Tokens</span>
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                currentUser ? "bg-emerald-400" : "bg-slate-600"
+              }`}
+            />
+          </button>
+
+          {isAuthLoading ? (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800/80 rounded-lg text-xs text-slate-400">
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-400" />
+              <span>Verificando...</span>
             </div>
-
-            {folderInfo.webViewLink && (
-              <a
-                href={folderInfo.webViewLink}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 font-sans text-xs font-semibold transition-colors"
+          ) : currentUser ? (
+            <div className="relative" ref={accountMenuRef}>
+              <button
+                onClick={() => setIsAccountMenuOpen(!isAccountMenuOpen)}
+                className="flex items-center gap-2 bg-slate-950 hover:bg-slate-850 border border-slate-800 hover:border-indigo-500/50 rounded-lg px-2.5 py-1.5 transition-colors cursor-pointer"
               >
-                <span>Abrir carpeta en Google Drive</span>
-                <ExternalLink className="w-3.5 h-3.5" />
-              </a>
-            )}
-          </div>
-        )}
+                {currentUser.photoURL ? (
+                  <img
+                    src={currentUser.photoURL}
+                    alt={currentUser.displayName || "Usuario"}
+                    className="w-5 h-5 rounded-full border border-indigo-500/40 shrink-0"
+                    referrerPolicy="no-referrer"
+                  />
+                ) : (
+                  <div className="w-5 h-5 rounded-full bg-indigo-600 text-white flex items-center justify-center text-[10px] font-bold shrink-0">
+                    {currentUser.displayName?.[0] || "U"}
+                  </div>
+                )}
+                <span className="text-xs font-medium text-white truncate max-w-[120px] hidden sm:inline">
+                  {currentUser.displayName || currentUser.email?.split("@")[0]}
+                </span>
+                <ChevronDown
+                  className={`w-3 h-3 text-slate-400 transition-transform ${
+                    isAccountMenuOpen ? "rotate-180 text-indigo-400" : ""
+                  }`}
+                />
+              </button>
+
+              {/* Multi-Account Dropdown Menu */}
+              {isAccountMenuOpen && (
+                <div className="absolute right-0 mt-1.5 w-64 rounded-xl bg-slate-900 border border-slate-800 shadow-2xl z-50 overflow-hidden">
+                  <div className="p-2.5 border-b border-slate-800 bg-slate-950/60 flex items-center justify-between text-xs">
+                    <span className="font-semibold text-white">Cuentas ({driveSession.accounts.length})</span>
+                    <button
+                      onClick={handleAddAnotherAccount}
+                      className="text-[11px] text-indigo-400 hover:text-indigo-300 font-semibold cursor-pointer"
+                    >
+                      + Agregar
+                    </button>
+                  </div>
+
+                  <div className="max-h-52 overflow-y-auto p-1 space-y-1">
+                    {driveSession.accounts.map((acc) => {
+                      const isActive =
+                        acc.id === (currentUser.email || currentUser.uid) ||
+                        acc.email === currentUser.email;
+
+                      return (
+                        <div
+                          key={acc.id}
+                          onClick={() => {
+                            if (!isActive) handleSwitchAccount(acc.id);
+                          }}
+                          className={`p-2 rounded-lg flex items-center justify-between gap-2 text-xs transition-colors ${
+                            isActive
+                              ? "bg-indigo-600/15 border border-indigo-500/30 text-white"
+                              : "hover:bg-slate-800 text-slate-300 cursor-pointer"
+                          }`}
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            {acc.photoURL ? (
+                              <img
+                                src={acc.photoURL}
+                                alt=""
+                                className="w-5 h-5 rounded-full object-cover shrink-0"
+                                referrerPolicy="no-referrer"
+                              />
+                            ) : (
+                              <div className="w-5 h-5 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-[10px] font-bold text-slate-200 shrink-0">
+                                {acc.displayName ? acc.displayName[0].toUpperCase() : "G"}
+                              </div>
+                            )}
+                            <div className="min-w-0">
+                              <p className="font-semibold truncate">{acc.displayName || "Usuario"}</p>
+                              <p className="text-[10px] text-slate-400 truncate font-mono">{acc.email}</p>
+                            </div>
+                          </div>
+                          {isActive && <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="p-1.5 border-t border-slate-800 bg-slate-950/80 space-y-0.5 text-xs">
+                    <button
+                      onClick={handleAddAnotherAccount}
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-slate-800 text-indigo-300 font-medium transition-colors cursor-pointer text-left"
+                    >
+                      <UserPlus className="w-3.5 h-3.5 text-indigo-400" />
+                      <span>Conectar otra cuenta</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        setIsAccountMenuOpen(false);
+                        setIsCookieModalOpen(true);
+                      }}
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-slate-800 text-amber-300 font-medium transition-colors cursor-pointer text-left"
+                    >
+                      <Cookie className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Gestionar Tokens</span>
+                    </button>
+                    <button
+                      onClick={handleLogout}
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-rose-500/10 text-rose-300 font-medium transition-colors cursor-pointer text-left"
+                    >
+                      <LogOut className="w-3.5 h-3.5 text-rose-400" />
+                      <span>Cerrar sesión</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <button
+              onClick={handleSignIn}
+              disabled={isSigningIn}
+              className="gsi-material-button text-xs"
+            >
+              <div className="gsi-material-button-icon">
+                <GoogleIcon className="w-4 h-4" />
+              </div>
+              <span className="gsi-material-button-contents">
+                {isSigningIn ? "Conectando..." : "Conectar Drive"}
+              </span>
+            </button>
+          )}
+        </div>
       </div>
 
-      {/* Notifications: Success or Error */}
+      {/* Notifications */}
       {downloadSuccess && (
-        <div className="p-3.5 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-xs text-emerald-300 flex items-center justify-between gap-3 shadow-lg">
+        <div className="p-2.5 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
             <span>{downloadSuccess}</span>
           </div>
           <button
             onClick={() => setDownloadSuccess(null)}
-            className="text-emerald-400 hover:text-white text-xs font-bold px-2 py-1 rounded"
+            className="text-emerald-400 hover:text-white text-xs font-bold px-1.5 py-0.5"
           >
             ✕
           </button>
@@ -1107,24 +1027,23 @@ export const DriveDownloadClient: React.FC<DriveDownloadClientProps> = ({
       )}
 
       {downloadError && (
-        <div className={`p-4 rounded-xl text-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-lg ${
+        <div className={`p-3 rounded-lg text-xs flex items-center justify-between gap-2 ${
           isSessionExpired
             ? "bg-amber-500/15 border border-amber-500/40 text-amber-200"
             : "bg-rose-500/10 border border-rose-500/30 text-rose-300"
         }`}>
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-2">
             <AlertCircle className={`w-4 h-4 shrink-0 ${isSessionExpired ? "text-amber-400" : "text-rose-400"}`} />
-            <span className="leading-relaxed">{downloadError}</span>
+            <span>{downloadError}</span>
           </div>
-          <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
+          <div className="flex items-center gap-1.5 shrink-0">
             {isSessionExpired && (
               <button
                 onClick={handleSignIn}
                 disabled={isSigningIn}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition-colors shadow-md cursor-pointer"
+                className="px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition-colors cursor-pointer"
               >
-                <GoogleIcon className="w-3.5 h-3.5" />
-                <span>{isSigningIn ? "Reconectando..." : "Reconectar con Google"}</span>
+                Reconectar
               </button>
             )}
             <button
@@ -1132,7 +1051,7 @@ export const DriveDownloadClient: React.FC<DriveDownloadClientProps> = ({
                 setDownloadError(null);
                 setIsSessionExpired(false);
               }}
-              className="text-slate-400 hover:text-white text-xs font-bold px-2 py-1 rounded"
+              className="text-slate-400 hover:text-white text-xs px-1.5 py-0.5"
             >
               ✕
             </button>
@@ -1140,373 +1059,192 @@ export const DriveDownloadClient: React.FC<DriveDownloadClientProps> = ({
         </div>
       )}
 
-      {/* Active progress indicator */}
+      {/* Progress Bar */}
       {downloadProgress.percent > 0 && (
-        <div className="bg-slate-900 border border-indigo-500/30 rounded-2xl p-4 shadow-lg space-y-2">
-          <div className="flex items-center justify-between text-xs font-semibold text-white">
-            <span className="flex items-center gap-2 text-indigo-300">
+        <div className="bg-slate-900 border border-indigo-500/30 rounded-lg p-3 space-y-1.5">
+          <div className="flex items-center justify-between text-xs">
+            <span className="flex items-center gap-1.5 text-indigo-300 font-medium">
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
               <span>{downloadProgress.statusText}</span>
             </span>
-            <span className="font-mono text-indigo-400">{downloadProgress.percent}%</span>
+            <span className="font-mono text-indigo-400 font-semibold">{downloadProgress.percent}%</span>
           </div>
-          <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
+          <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
             <div
-              className="bg-gradient-to-r from-indigo-500 to-emerald-400 h-full transition-all duration-300"
+              className="bg-indigo-500 h-full transition-all duration-300"
               style={{ width: `${downloadProgress.percent}%` }}
             />
           </div>
         </div>
       )}
 
-      {/* Unauthenticated notice if not signed in */}
+      {/* Unauthenticated notice */}
       {!currentUser && !isAuthLoading && (
-        <div className="space-y-8">
-          <div className="bg-slate-900/90 border border-indigo-500/20 rounded-2xl p-8 text-center max-w-xl mx-auto space-y-4 shadow-2xl">
-            <div className="w-14 h-14 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 mx-auto flex items-center justify-center shadow-lg">
-              <Folder className="w-7 h-7" />
-            </div>
-            <div className="space-y-1">
-              <h3 className="text-base font-bold text-white">
-                Conecta tu Google Drive para Sincronizar Descargas
-              </h3>
-              <p className="text-xs text-slate-400 leading-relaxed">
-                Inicia sesión con tu cuenta de Google para guardar automáticamente en tu carpeta dedicada <code className="text-indigo-300 font-mono">Descargas Servidor</code> o descarga de forma ultrarrápida usando el motor Descarga Secuencial multi-conexión del host.
-              </p>
-            </div>
-            <div className="pt-2 flex flex-col sm:flex-row items-center justify-center gap-3">
-              <button
-                onClick={handleSignIn}
-                disabled={isSigningIn}
-                className="gsi-material-button scale-105 shadow-xl shadow-indigo-950"
-              >
-                <div className="gsi-material-button-icon">
-                  <GoogleIcon className="w-5 h-5" />
-                </div>
-                <span className="gsi-material-button-contents">
-                  {isSigningIn ? "Conectando..." : "Iniciar sesión con Google"}
-                </span>
-              </button>
-
-              <button
-                onClick={() => setIsCookieModalOpen(true)}
-                className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-950 border border-slate-800 hover:border-amber-500/40 text-xs font-semibold text-slate-300 hover:text-white transition-all cursor-pointer shadow-lg"
-              >
-                <Cookie className="w-4 h-4 text-amber-400" />
-                <span>Gestionar Cookies / Token</span>
-              </button>
-            </div>
-
-            <div className="pt-3 border-t border-slate-800/80 flex items-center justify-center gap-2 text-[11px] text-slate-400 font-mono">
-              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Persistencia permanente client-side (Cookies y LocalStorage) habilitada</span>
-            </div>
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 text-center max-w-md mx-auto space-y-3">
+          <Folder className="w-8 h-8 text-indigo-400 mx-auto" />
+          <div>
+            <h3 className="text-sm font-bold text-white">Google Drive Desconectado</h3>
+            <p className="text-xs text-slate-400 mt-1">
+              Conecta tu cuenta de Google para transferir y gestionar tus archivos directamente en la nube.
+            </p>
           </div>
+          <div className="pt-2 flex items-center justify-center gap-2">
+            <button
+              onClick={handleSignIn}
+              disabled={isSigningIn}
+              className="gsi-material-button"
+            >
+              <div className="gsi-material-button-icon">
+                <GoogleIcon className="w-4 h-4" />
+              </div>
+              <span className="gsi-material-button-contents">
+                {isSigningIn ? "Conectando..." : "Iniciar con Google"}
+              </span>
+            </button>
+            <button
+              onClick={() => setIsCookieModalOpen(true)}
+              className="px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 hover:border-amber-500/40 text-xs text-slate-300 hover:text-white transition-colors cursor-pointer"
+            >
+              Tokens
+            </button>
           </div>
+        </div>
       )}
 
-      {/* Main Download Client Interface */}
+      {/* Main Grid: Tools (Left) & File Explorer (Right) */}
       {currentUser && (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Left Column (2/3): Download Action Center */}
-          <div className="lg:col-span-2 space-y-6">
-            {/* Mode Switcher Tabs */}
-            <div className="flex items-center gap-1.5 p-1 bg-slate-950 border border-slate-800 rounded-xl overflow-x-auto">
-              <button
-                onClick={() => setDownloadMode("stream")}
-                className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
-                  downloadMode === "stream"
-                    ? "bg-emerald-600 text-white shadow-lg shadow-emerald-600/30"
-                    : "text-slate-400 hover:text-white hover:bg-slate-900"
-                }`}
-              >
-                <CloudLightning className="w-3.5 h-3.5 text-emerald-300" />
-                <span>Streaming ISO a Drive</span>
-                <span className="px-1.5 py-0.5 rounded text-[9px] bg-emerald-950 text-emerald-300 font-mono border border-emerald-500/30">
-                  Zero-Disk & Anti-Wipe
-                </span>
-              </button>
-
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+          {/* Left Column: Actions (7 cols) */}
+          <div className="lg:col-span-7 space-y-3">
+            {/* Sub-mode selector pills */}
+            <div className="flex items-center gap-1 p-1 bg-slate-950 border border-slate-800 rounded-lg">
               <button
                 onClick={() => setDownloadMode("proxy")}
-                className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
+                className={`flex-1 py-1.5 text-xs font-semibold rounded-md transition-colors cursor-pointer text-center ${
                   downloadMode === "proxy"
-                    ? "bg-indigo-600 text-white shadow-lg shadow-indigo-600/30"
+                    ? "bg-indigo-600 text-white shadow-sm"
                     : "text-slate-400 hover:text-white hover:bg-slate-900"
                 }`}
               >
-                <LinkIcon className="w-3.5 h-3.5 text-indigo-400" />
-                <span>Proxy Directo</span>
+                Descargar URL
               </button>
-
-              <button
-                onClick={() => setDownloadMode("diagnostics")}
-                className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
-                  downloadMode === "diagnostics"
-                    ? "bg-indigo-600 text-white shadow-lg shadow-indigo-600/30"
-                    : "text-slate-400 hover:text-white hover:bg-slate-900"
-                }`}
-              >
-                <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Diagnósticos Servidor</span>
-              </button>
-
               <button
                 onClick={() => setDownloadMode("local")}
-                className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
+                className={`flex-1 py-1.5 text-xs font-semibold rounded-md transition-colors cursor-pointer text-center ${
                   downloadMode === "local"
-                    ? "bg-indigo-600 text-white shadow-lg shadow-indigo-600/30"
+                    ? "bg-indigo-600 text-white shadow-sm"
                     : "text-slate-400 hover:text-white hover:bg-slate-900"
                 }`}
               >
-                <Upload className="w-3.5 h-3.5 text-purple-400" />
-                <span>Subir Archivo Local</span>
+                Subir Archivo
+              </button>
+              <button
+                onClick={() => setDownloadMode("diagnostics")}
+                className={`flex-1 py-1.5 text-xs font-semibold rounded-md transition-colors cursor-pointer text-center ${
+                  downloadMode === "diagnostics"
+                    ? "bg-indigo-600 text-white shadow-sm"
+                    : "text-slate-400 hover:text-white hover:bg-slate-900"
+                }`}
+              >
+                Informe Servidor
               </button>
             </div>
 
-            {/* Mode 0: Zero-Disk Persistent Streaming to Drive */}
-            {downloadMode === "stream" && (
-              <DriveStreamDownloader
-                accessToken={accessToken}
-                folderId={folderInfo?.id}
-                folderName={folderInfo?.name || folderName}
-                onConnectDrive={handleSignIn}
-              />
-            )}
-
-
-            {/* Mode 2: Direct URL Proxy */}
+            {/* Mode 1: URL Download Form */}
             {downloadMode === "proxy" && (
-              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-4">
-                <div className="flex items-center justify-between">
+              <div className="bg-slate-900 border border-slate-800/80 rounded-xl p-4 space-y-3">
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    URL del Archivo
+                  </label>
                   <div className="flex items-center gap-2">
-                    <LinkIcon className="w-4 h-4 text-indigo-400" />
-                    <h3 className="text-sm font-bold text-white">
-                      Descargar Archivo Web Directo a Drive
-                    </h3>
-                  </div>
-                  <span className="text-[11px] text-slate-400 font-mono">
-                    Soporta HTTP/HTTPS directo
-                  </span>
-                </div>
-
-                <div className="space-y-3">
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                      URL del Archivo en Internet
-                    </label>
-                    <div className="relative flex items-center">
-                      <input
-                        type="url"
-                        placeholder="https://ejemplo.com/archivo.zip o .pdf, .json, .tar.gz..."
-                        value={downloadUrl}
-                        onChange={(e) => setDownloadUrl(e.target.value)}
-                        disabled={isDownloading}
-                        className="w-full pl-3 pr-20 py-2.5 rounded-xl bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-xs font-mono text-white placeholder:text-slate-600 outline-none transition-all"
-                      />
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          try {
-                            const clip = await navigator.clipboard.readText();
-                            if (clip) setDownloadUrl(clip);
-                          } catch {
-                            // ignore clipboard permission error
-                          }
-                        }}
-                        className="absolute right-2 px-2.5 py-1 text-[11px] font-semibold text-indigo-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors cursor-pointer"
-                      >
-                        Pegar
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                        Nombre de Archivo Personalizado (Opcional)
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="Ej: mi-paquete.zip"
-                        value={customFileName}
-                        onChange={(e) => setCustomFileName(e.target.value)}
-                        disabled={isDownloading}
-                        className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-xs font-mono text-white placeholder:text-slate-600 outline-none transition-all"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                        Destino en Drive
-                      </label>
-                      <div className="px-3 py-2 rounded-xl bg-slate-950/60 border border-slate-800/80 text-xs font-mono text-slate-400 flex items-center justify-between">
-                        <span className="truncate">📁 {folderInfo?.name || "Descargas Servidor"}</span>
-                        <span className="text-[10px] text-emerald-400 font-semibold uppercase">Listo</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Engine Selection */}
-                  <div className="p-3 bg-slate-950/60 border border-slate-800 rounded-xl space-y-2">
-                    <label className="block text-xs font-semibold text-slate-300">
-                      Motor de Descarga Seleccionado:
-                    </label>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setUrlDownloadEngine("sequential")}
-                        className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer ${
-                          false
-                            ? "bg-indigo-600/15 border-indigo-500/50 text-white"
-                            : "bg-slate-900/40 border-slate-800 text-slate-400 hover:text-slate-200"
-                        }`}
-                      >
-                        <div className="flex items-center gap-1.5 text-xs font-bold text-indigo-300">
-                          <Zap className="w-3.5 h-3.5 text-amber-400" />
-                          <span>Motor Persistente Descarga Secuencial</span>
-                          <span className="text-[9px] px-1.5 py-0.2 rounded bg-indigo-500/20 text-indigo-300 uppercase font-mono">
-                            Recomendado
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-slate-400 mt-1 leading-snug">
-                          Multi-hilo. Guarda el progreso en disco: soporta archivos pesados (+50 GB), pausa, reanudación y no pierde nada al recargar.
-                        </p>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => setUrlDownloadEngine("proxy")}
-                        className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer ${
-                          urlDownloadEngine === "proxy"
-                            ? "bg-indigo-600/15 border-indigo-500/50 text-white"
-                            : "bg-slate-900/40 border-slate-800 text-slate-400 hover:text-slate-200"
-                        }`}
-                      >
-                        <div className="flex items-center gap-1.5 text-xs font-bold text-slate-300">
-                          <LinkIcon className="w-3.5 h-3.5 text-indigo-400" />
-                          <span>Descarga Rápida en Memoria</span>
-                        </div>
-                        <p className="text-[11px] text-slate-400 mt-1 leading-snug">
-                          Stream directo para archivos ligeros (&lt;100 MB). No persiste si recargas el navegador en medio del proceso.
-                        </p>
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <span className="text-[11px] text-slate-500">Pruebas rápidas:</span>
-                      {samplePresets.map((preset) => (
-                        <button
-                          key={preset.name}
-                          onClick={() => {
-                            setDownloadUrl(preset.url);
-                            setCustomFileName(preset.filename);
-                          }}
-                          className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-mono transition-colors cursor-pointer"
-                          title={preset.desc}
-                        >
-                          {preset.name}
-                        </button>
-                      ))}
-                    </div>
-
+                    <input
+                      type="url"
+                      placeholder="https://ejemplo.com/archivo.zip"
+                      value={downloadUrl}
+                      onChange={(e) => setDownloadUrl(e.target.value)}
+                      disabled={isDownloading}
+                      className="flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 focus:border-indigo-500 text-xs font-mono text-white placeholder:text-slate-600 outline-none"
+                    />
                     <button
-                      onClick={() => handleDownloadFromUrl()}
-                      disabled={isDownloading || !downloadUrl.trim()}
-                      className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-all cursor-pointer shadow-lg shadow-indigo-600/30 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          const clip = await navigator.clipboard.readText();
+                          if (clip) setDownloadUrl(clip);
+                        } catch {}
+                      }}
+                      className="px-2.5 py-2 text-xs font-medium text-slate-300 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors cursor-pointer shrink-0"
                     >
-                      {isDownloading ? (
-                        <>
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          <span>Descargando a Drive...</span>
-                        </>
-                      ) : (
-                        <>
-                          <CloudDownload className="w-3.5 h-3.5" />
-                          <span>Descargar y Guardar en Drive</span>
-                        </>
-                      )}
+                      Pegar
                     </button>
                   </div>
                 </div>
-              </div>
-            )}
 
-            {/* Mode 3: Server Diagnostics */}
-            {downloadMode === "diagnostics" && (
-              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Sparkles className="w-4 h-4 text-emerald-400" />
-                    <h3 className="text-sm font-bold text-white">
-                      Guardar Diagnósticos del Servidor en Drive
-                    </h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      Nombre Opcional
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="archivo.zip"
+                      value={customFileName}
+                      onChange={(e) => setCustomFileName(e.target.value)}
+                      disabled={isDownloading}
+                      className="w-full px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-xs font-mono text-white placeholder:text-slate-600 outline-none focus:border-indigo-500"
+                    />
                   </div>
-                  <span className="text-[11px] text-slate-400 font-mono">1-Clic directo</span>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      Destino
+                    </label>
+                    <div className="px-3 py-1.5 rounded-lg bg-slate-950/60 border border-slate-800 text-xs font-mono text-slate-400 truncate">
+                      📁 {folderInfo?.name || folderName}
+                    </div>
+                  </div>
                 </div>
 
-                <p className="text-xs text-slate-400">
-                  Guarda una instantánea técnica oficial del servidor host (CPU, memoria, discos, kernel y métricas) como archivo en tu carpeta dedicada de Google Drive.
-                </p>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <button
-                    onClick={() => handleSaveServerReportToDrive("markdown")}
-                    disabled={isDownloading || !serverSpecs}
-                    className="p-3.5 rounded-xl bg-slate-950 hover:bg-slate-850 border border-slate-800 hover:border-indigo-500/50 text-left transition-all group cursor-pointer disabled:opacity-50"
-                  >
-                    <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-xs font-bold text-white group-hover:text-indigo-300 flex items-center gap-1.5">
-                        <FileText className="w-4 h-4 text-indigo-400" />
-                        Informe Completo (.md)
-                      </span>
-                      <span className="text-[10px] text-slate-500 font-mono">Markdown</span>
-                    </div>
-                    <p className="text-[11px] text-slate-400 line-clamp-2">
-                      Reporte formateado listo para documentación técnica o git.
-                    </p>
-                  </button>
+                {/* Quick Presets */}
+                <div className="flex items-center justify-between gap-2 pt-1">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-[10px] text-slate-500">Ejemplos:</span>
+                    {samplePresets.map((preset) => (
+                      <button
+                        key={preset.name}
+                        onClick={() => {
+                          setDownloadUrl(preset.url);
+                          setCustomFileName(preset.filename);
+                        }}
+                        className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono transition-colors cursor-pointer"
+                      >
+                        {preset.name.split(" ")[0]}
+                      </button>
+                    ))}
+                  </div>
 
                   <button
-                    onClick={() => handleSaveServerReportToDrive("json")}
-                    disabled={isDownloading || !serverSpecs}
-                    className="p-3.5 rounded-xl bg-slate-950 hover:bg-slate-850 border border-slate-800 hover:border-indigo-500/50 text-left transition-all group cursor-pointer disabled:opacity-50"
+                    onClick={() => handleDownloadFromUrl()}
+                    disabled={isDownloading || !downloadUrl.trim()}
+                    className="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-colors cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
                   >
-                    <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-xs font-bold text-white group-hover:text-indigo-300 flex items-center gap-1.5">
-                        <FileCode className="w-4 h-4 text-emerald-400" />
-                        Métricas Raw (.json)
-                      </span>
-                      <span className="text-[10px] text-slate-500 font-mono">JSON Estructurado</span>
-                    </div>
-                    <p className="text-[11px] text-slate-400 line-clamp-2">
-                      Telemetría completa de hardware y sistema para análisis automatizado.
-                    </p>
+                    {isDownloading ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <CloudDownload className="w-3.5 h-3.5" />
+                    )}
+                    <span>Descargar a Drive</span>
                   </button>
                 </div>
               </div>
             )}
 
-            {/* Mode 4: Local Upload */}
+            {/* Mode 2: Local Upload */}
             {downloadMode === "local" && (
-              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Upload className="w-4 h-4 text-purple-400" />
-                    <h3 className="text-sm font-bold text-white">
-                      Transferir Archivo Local a la Carpeta de Drive
-                    </h3>
-                  </div>
-                  <span className="text-[11px] text-slate-400 font-mono">
-                    Subida directa a {folderInfo?.name}
-                  </span>
-                </div>
-
+              <div className="bg-slate-900 border border-slate-800/80 rounded-xl p-4 space-y-3">
                 <div
                   onClick={() => fileInputRef.current?.click()}
-                  className="border-2 border-dashed border-slate-800 hover:border-indigo-500/50 bg-slate-950/60 rounded-xl p-6 text-center cursor-pointer transition-all group"
+                  className="border border-dashed border-slate-800 hover:border-indigo-500/60 bg-slate-950/60 rounded-xl p-6 text-center cursor-pointer transition-colors group"
                 >
                   <input
                     ref={fileInputRef}
@@ -1514,132 +1252,148 @@ export const DriveDownloadClient: React.FC<DriveDownloadClientProps> = ({
                     onChange={handleLocalFileUpload}
                     className="hidden"
                   />
-                  <div className="w-10 h-10 rounded-xl bg-indigo-500/10 text-indigo-400 mx-auto flex items-center justify-center mb-2 group-hover:scale-110 transition-transform">
+                  <div className="w-8 h-8 rounded-lg bg-indigo-500/10 text-indigo-400 mx-auto flex items-center justify-center mb-2 group-hover:scale-105 transition-transform">
                     {isUploadingLocal ? (
-                      <Loader2 className="w-5 h-5 animate-spin" />
+                      <Loader2 className="w-4 h-4 animate-spin" />
                     ) : (
-                      <Upload className="w-5 h-5" />
+                      <Upload className="w-4 h-4" />
                     )}
                   </div>
-                  <p className="text-xs font-bold text-white group-hover:text-indigo-300">
+                  <p className="text-xs font-medium text-white group-hover:text-indigo-300">
                     {isUploadingLocal
-                      ? "Subiendo archivo a tu Google Drive..."
-                      : "Haz clic para seleccionar o arrastra un archivo aquí"}
+                      ? "Subiendo a Google Drive..."
+                      : "Haz clic para seleccionar o arrastra un archivo"}
                   </p>
-                  <p className="text-[11px] text-slate-500 mt-1 font-mono">
-                    Se guardará inmediatamente en tu carpeta dedicada de Google Drive
+                  <p className="text-[10px] text-slate-500 mt-0.5 font-mono">
+                    Destino: {folderInfo?.name || folderName}
                   </p>
+                </div>
+              </div>
+            )}
+
+            {/* Mode 3: Server Diagnostics */}
+            {downloadMode === "diagnostics" && (
+              <div className="bg-slate-900 border border-slate-800/80 rounded-xl p-4 space-y-3">
+                <p className="text-xs text-slate-400">
+                  Guarda un reporte del estado del servidor directamente en tu Google Drive.
+                </p>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => handleSaveServerReportToDrive("markdown")}
+                    disabled={isDownloading || !serverSpecs}
+                    className="p-3 rounded-lg bg-slate-950 hover:bg-slate-850 border border-slate-800 hover:border-indigo-500/40 text-left transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    <div className="flex items-center gap-1.5 text-xs font-bold text-white mb-0.5">
+                      <FileText className="w-3.5 h-3.5 text-indigo-400" />
+                      <span>Markdown (.md)</span>
+                    </div>
+                    <p className="text-[10px] text-slate-400">Reporte legible</p>
+                  </button>
+
+                  <button
+                    onClick={() => handleSaveServerReportToDrive("json")}
+                    disabled={isDownloading || !serverSpecs}
+                    className="p-3 rounded-lg bg-slate-950 hover:bg-slate-850 border border-slate-800 hover:border-indigo-500/40 text-left transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    <div className="flex items-center gap-1.5 text-xs font-bold text-white mb-0.5">
+                      <FileCode className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>JSON (.json)</span>
+                    </div>
+                    <p className="text-[10px] text-slate-400">Métricas completas</p>
+                  </button>
                 </div>
               </div>
             )}
           </div>
 
-
-          {/* Right Column (1/3): Dedicated Folder File Explorer */}
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl flex flex-col h-full min-h-[550px]">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+          {/* Right Column: File Explorer (5 cols) */}
+          <div className="lg:col-span-5 bg-slate-900 border border-slate-800/80 rounded-xl p-3.5 flex flex-col min-h-[380px]">
+            <div className="flex items-center justify-between pb-2.5 border-b border-slate-800/80">
               <div className="flex items-center gap-2">
                 <Folder className="w-4 h-4 text-indigo-400" />
-                <h3 className="text-sm font-bold text-white">
-                  Archivos en Drive
-                </h3>
+                <h3 className="text-xs font-bold text-white">Archivos en Drive</h3>
+                <span className="text-[10px] font-mono text-slate-400">({files.length})</span>
               </div>
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1">
+                {folderInfo?.webViewLink && (
+                  <a
+                    href={folderInfo.webViewLink}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="p-1 rounded text-slate-400 hover:text-indigo-300 hover:bg-slate-800 transition-colors"
+                    title="Abrir en Drive"
+                  >
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                )}
                 <button
                   onClick={handleRefreshFiles}
                   disabled={isFilesLoading}
-                  className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
-                  title="Refrescar lista de archivos"
+                  className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                  title="Refrescar"
                 >
-                  <RefreshCw className={`w-3.5 h-3.5 ${isFilesLoading ? "animate-spin text-indigo-400" : ""}`} />
+                  <RefreshCw className={`w-3 h-3 ${isFilesLoading ? "animate-spin text-indigo-400" : ""}`} />
                 </button>
               </div>
             </div>
 
-            {/* Search filter in folder */}
-            <div className="py-3">
+            {/* Search */}
+            <div className="py-2">
               <div className="relative">
-                <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                <Search className="w-3 h-3 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
                 <input
                   type="text"
-                  placeholder="Buscar en la carpeta..."
+                  placeholder="Buscar archivo..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full pl-8 pr-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-xs font-mono text-white placeholder:text-slate-600 outline-none focus:border-indigo-500"
+                  className="w-full pl-7 pr-2.5 py-1 rounded-md bg-slate-950 border border-slate-800 text-xs font-mono text-white placeholder:text-slate-600 outline-none focus:border-indigo-500"
                 />
               </div>
             </div>
 
             {/* Files List */}
-            <div className="flex-1 overflow-y-auto space-y-2 pr-1 max-h-[440px]">
+            <div className="flex-1 overflow-y-auto space-y-1 pr-0.5 max-h-[300px]">
               {isFilesLoading && files.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-12 text-slate-500 text-xs space-y-2">
-                  <Loader2 className="w-5 h-5 animate-spin text-indigo-400" />
-                  <span>Leyendo archivos de Google Drive...</span>
+                <div className="flex items-center justify-center py-10 text-slate-500 text-xs gap-2">
+                  <Loader2 className="w-4 h-4 animate-spin text-indigo-400" />
+                  <span>Cargando...</span>
                 </div>
               ) : filteredFiles.length === 0 ? (
-                <div className="text-center py-12 px-4 space-y-2 text-slate-500">
-                  <Folder className="w-8 h-8 mx-auto text-slate-600" />
-                  <p className="text-xs font-medium text-slate-400">
-                    {searchQuery ? "No hay archivos que coincidan" : "Carpeta vacía"}
-                  </p>
-                  <p className="text-[11px] text-slate-500 leading-relaxed">
-                    {searchQuery
-                      ? "Intenta con otro término de búsqueda"
-                      : "Descarga un archivo desde una URL o guarda un informe técnico para verlo aquí."}
-                  </p>
+                <div className="text-center py-8 text-slate-500 text-xs">
+                  <p>{searchQuery ? "Sin resultados" : "Carpeta vacía"}</p>
                 </div>
               ) : (
                 filteredFiles.map((file) => (
                   <div
                     key={file.id}
-                    className="p-2.5 rounded-xl bg-slate-950/80 border border-slate-800/80 hover:border-indigo-500/40 transition-all flex items-center justify-between gap-3 group"
+                    className="p-2 rounded-lg bg-slate-950/60 border border-slate-800/60 hover:border-indigo-500/30 transition-colors flex items-center justify-between gap-2 text-xs"
                   >
-                    <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                      <div className="w-8 h-8 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-center shrink-0">
-                        {getFileIcon(file.name, file.mimeType)}
-                      </div>
+                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                      <div className="shrink-0">{getFileIcon(file.name, file.mimeType)}</div>
                       <div className="min-w-0 flex-1">
-                        <p className="text-xs font-semibold text-white truncate" title={file.name}>
+                        <p className="font-medium text-slate-200 truncate" title={file.name}>
                           {file.name}
                         </p>
-                        <div className="flex items-center gap-2 text-[10px] text-slate-500 font-mono mt-0.5">
-                          <span>{formatBytes(file.size)}</span>
-                          <span>•</span>
-                          <span>
-                            {file.createdTime
-                              ? new Date(file.createdTime).toLocaleDateString()
-                              : "Reciente"}
-                          </span>
-                        </div>
+                        <p className="text-[10px] text-slate-500 font-mono">
+                          {formatBytes(file.size)}
+                        </p>
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-1 shrink-0">
-                      {file.webViewLink && (
-                        <a
-                          href={file.webViewLink}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-300 hover:bg-indigo-500/10 transition-colors"
-                          title="Abrir en Google Drive"
-                        >
-                          <ExternalLink className="w-3.5 h-3.5" />
-                        </a>
-                      )}
+                    <div className="flex items-center gap-0.5 shrink-0">
                       <button
                         onClick={() => handleDownloadFileLocally(file)}
-                        className="p-1.5 rounded-lg text-slate-400 hover:text-emerald-300 hover:bg-emerald-500/10 transition-colors cursor-pointer"
-                        title="Descargar archivo a este dispositivo"
+                        className="p-1 rounded text-slate-400 hover:text-emerald-300 hover:bg-slate-800 transition-colors cursor-pointer"
+                        title="Descargar"
                       >
-                        <Download className="w-3.5 h-3.5" />
+                        <Download className="w-3 h-3" />
                       </button>
                       <button
                         onClick={() => handleRequestDelete(file)}
-                        className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
-                        title="Eliminar de Google Drive (requiere confirmación)"
+                        className="p-1 rounded text-slate-400 hover:text-rose-400 hover:bg-slate-800 transition-colors cursor-pointer"
+                        title="Eliminar"
                       >
-                        <Trash2 className="w-3.5 h-3.5" />
+                        <Trash2 className="w-3 h-3" />
                       </button>
                     </div>
                   </div>
@@ -1648,19 +1402,9 @@ export const DriveDownloadClient: React.FC<DriveDownloadClientProps> = ({
             </div>
 
             {/* Folder Footer Summary */}
-            <div className="pt-3 border-t border-slate-800/80 mt-auto flex items-center justify-between text-[11px] font-mono text-slate-500">
-              <span>{filteredFiles.length} de {files.length} archivos</span>
-              {folderInfo?.webViewLink && (
-                <a
-                  href={folderInfo.webViewLink}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-indigo-400 hover:underline flex items-center gap-1"
-                >
-                  <span>Ver carpeta en Drive</span>
-                  <ExternalLink className="w-3 h-3" />
-                </a>
-              )}
+            <div className="pt-2 border-t border-slate-800/80 mt-auto flex items-center justify-between text-[10px] font-mono text-slate-500">
+              <span>{filteredFiles.length} archivos</span>
+              <span>{(totalFolderBytes / (1024 * 1024)).toFixed(1)} MB</span>
             </div>
           </div>
         </div>

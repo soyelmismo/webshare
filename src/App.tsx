@@ -20,8 +20,10 @@ import { ReportModal } from "./components/ReportModal";
 import { DriveDownloadClient } from "./components/DriveDownloadClient";
 import { FileCommander } from "./components/FileCommander";
 import { DriveStreamDownloader } from "./components/DriveStreamDownloader";
+import { SpeedTestView } from "./components/SpeedTestView";
 import { loadDriveSession } from "./utils/driveStorage";
-import { Loader2, AlertCircle, RefreshCw, Server } from "lucide-react";
+import { recoverStreamTasksFromDrive } from "./utils/streamApi";
+import { Loader2, AlertCircle, RefreshCw, Server, Zap, CheckCircle2 } from "lucide-react";
 
 export function App() {
   const [serverSpecs, setServerSpecs] = useState<ServerSpecs | null>(() => getCachedServerSpecs());
@@ -34,9 +36,42 @@ export function App() {
   const [isReportOpen, setIsReportOpen] = useState(false);
   const [apiLatency, setApiLatency] = useState<number>(0);
   const [retryCountdown, setRetryCountdown] = useState<number>(3);
+  const [autoResumeNotice, setAutoResumeNotice] = useState<string | null>(null);
 
   const serverSpecsRef = useRef<ServerSpecs | null>(serverSpecs);
   serverSpecsRef.current = serverSpecs;
+  const initialRecoverTriggered = useRef(false);
+
+  // Auto-recover transactions from Drive ONCE on initial app load / browser refresh
+  useEffect(() => {
+    if (initialRecoverTriggered.current) return;
+    initialRecoverTriggered.current = true;
+
+    try {
+      const alreadyRecoveredInSession = sessionStorage.getItem("drive_stream_session_recovered");
+      if (alreadyRecoveredInSession) return;
+    } catch {}
+
+    const session = loadDriveSession();
+    if (session.token && !session.isExpired) {
+      recoverStreamTasksFromDrive(session.token, session.folder?.id)
+        .then((res) => {
+          try {
+            sessionStorage.setItem("drive_stream_session_recovered", "true");
+          } catch {}
+
+          if (res.recoveredCount > 0 || (res.resumedSequentialCount && res.resumedSequentialCount > 0)) {
+            const totalResumed = res.recoveredCount + (res.resumedSequentialCount || 0);
+            setAutoResumeNotice(
+              `⚡ Sesión de Google Drive disponible: Se recuperaron de Drive y auto-reanudaron ${totalResumed} transacción(es) en curso.`
+            );
+          }
+        })
+        .catch((err) => {
+          console.warn("[App] Auto-recovery on reload notice:", err.message);
+        });
+    }
+  }, []);
 
   const [benchmarkStats, setBenchmarkStats] = useState<ServerBenchmarkStats>({
     status: "idle",
@@ -203,8 +238,38 @@ export function App() {
       <NavigationTabs activeTab={activeTab} onChangeTab={setActiveTab} />
 
       {/* Main Content View */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 lg:px-8 py-6">
-        {activeTab === "overview" && (
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 lg:px-8 py-6 space-y-4">
+        {autoResumeNotice && (
+          <div className="bg-emerald-950/60 border border-emerald-500/40 rounded-xl p-3.5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs text-emerald-200 shadow-lg shadow-emerald-950/40 animate-fade-in">
+            <div className="flex items-center gap-2.5">
+              <div className="p-1.5 bg-emerald-500/20 rounded-lg text-emerald-400 shrink-0">
+                <Zap className="w-4 h-4" />
+              </div>
+              <span className="font-medium">{autoResumeNotice}</span>
+            </div>
+            <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
+              {activeTab !== "stream" && (
+                <button
+                  onClick={() => {
+                    setActiveTab("stream");
+                    setAutoResumeNotice(null);
+                  }}
+                  className="px-3 py-1 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-lg transition"
+                >
+                  Ver Streaming
+                </button>
+              )}
+              <button
+                onClick={() => setAutoResumeNotice(null)}
+                className="px-2 py-1 text-slate-400 hover:text-slate-200 text-xs"
+              >
+                Cerrar
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div className={activeTab === "overview" ? "block" : "hidden"}>
           <OverviewDashboard
             serverSpecs={serverSpecs}
             benchmarkStats={benchmarkStats}
@@ -213,62 +278,66 @@ export function App() {
             onRunBenchmark={handleRunBenchmark}
             apiLatency={apiLatency}
           />
-        )}
+        </div>
 
-        {activeTab === "stream" && (
+        <div className={activeTab === "stream" ? "block" : "hidden"}>
           <DriveStreamDownloader
             accessToken={loadDriveSession().token}
             folderId={loadDriveSession().folder?.id}
             folderName={loadDriveSession().folder?.name || "Descargas Servidor"}
             onConnectDrive={() => setActiveTab("drive")}
           />
-        )}
+        </div>
 
-        {activeTab === "commander" && (
+        <div className={activeTab === "speedtest" ? "block" : "hidden"}>
+          <SpeedTestView serverSpecs={serverSpecs} />
+        </div>
+
+        <div className={activeTab === "commander" ? "block" : "hidden"}>
           <FileCommander
             serverSpecs={serverSpecs}
             onNavigateToStream={() => setActiveTab("drive")}
           />
-        )}
+        </div>
 
-        {activeTab === "drive" && (
+        <div className={activeTab === "drive" ? "block" : "hidden"}>
           <DriveDownloadClient
             serverSpecs={serverSpecs}
             benchmarkStats={benchmarkStats}
             onNavigateToCommander={() => setActiveTab("commander")}
           />
-        )}
+        </div>
 
-        {activeTab === "cpu" && (
+        <div className={activeTab === "cpu" ? "block" : "hidden"}>
           <CpuDetails
             serverSpecs={serverSpecs}
             onRunBenchmark={handleRunBenchmark}
           />
-        )}
+        </div>
 
-        {activeTab === "memory" && (
+        <div className={activeTab === "memory" ? "block" : "hidden"}>
           <MemoryDetails serverSpecs={serverSpecs} />
-        )}
+        </div>
 
-        {activeTab === "storage" && (
+        <div className={activeTab === "storage" ? "block" : "hidden"}>
           <StorageDetails serverSpecs={serverSpecs} />
-        )}
+        </div>
 
-        {activeTab === "network" && (
+        <div className={activeTab === "network" ? "block" : "hidden"}>
           <NetworkDetails serverSpecs={serverSpecs} />
-        )}
+        </div>
 
-        {activeTab === "runtime" && (
+        <div className={activeTab === "runtime" ? "block" : "hidden"}>
           <RuntimeDetails serverSpecs={serverSpecs} />
-        )}
+        </div>
 
-        {activeTab === "benchmark" && (
+        <div className={activeTab === "benchmark" ? "block" : "hidden"}>
           <BenchmarkView
             serverSpecs={serverSpecs}
             benchmarkStats={benchmarkStats}
             onRunBenchmark={handleRunBenchmark}
           />
-        )}
+        </div>
       </main>
 
       {/* Footer */}

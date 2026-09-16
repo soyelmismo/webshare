@@ -694,6 +694,30 @@ export class SequentialChunkEngine {
     this.saveRegistry();
     return true;
   }
+
+  /**
+   * Automatically resumes interrupted sequential streaming jobs when Google Drive session is available
+   */
+  public autoResumePendingJobs(accessToken?: string, folderId?: string): SequentialStreamJob[] {
+    const resumed: SequentialStreamJob[] = [];
+    for (const job of this.jobs.values()) {
+      if (
+        (job.status === "paused" || job.status === "starting" || job.status === "streaming" || job.status === "downloading") &&
+        job.downloadedBytes < job.totalBytes &&
+        !this.abortControllers.has(job.id)
+      ) {
+        try {
+          const ok = this.resumeJob(job.id, accessToken, folderId);
+          if (ok) {
+            resumed.push(job);
+          }
+        } catch (e) {
+          console.warn(`[SequentialEngine] Failed to auto-resume job ${job.id}:`, e);
+        }
+      }
+    }
+    return resumed;
+  }
 }
 
 export const sequentialChunkEngine = new SequentialChunkEngine();

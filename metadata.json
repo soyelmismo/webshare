@@ -1,0 +1,6 @@
+{
+  "name": "Especificaciones del Servidor",
+  "description": "Diagnóstico e inspección en tiempo real del servidor host con streaming continuo de ISO/torrents directo a Google Drive (zero-disk, tracking con manifiestos JSON y MD5), cliente de descarga integrado (soporte aria2c multi-hilo) y File Commander dual-pane.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

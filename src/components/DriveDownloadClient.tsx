@@ -101,6 +101,13 @@ export const DriveDownloadClient: React.FC<DriveDownloadClientProps> = ({
   useEffect(() => {
     const unsubscribe = onDriveSessionChange((updated) => {
       setDriveSession(updated);
+      if (updated?.token && !updated.isExpired) {
+        setAccessToken(updated.token);
+        setIsSessionExpired(false);
+      } else if (updated?.isExpired) {
+        setAccessToken(null);
+        setIsSessionExpired(true);
+      }
       if (updated?.user) {
         setCurrentUser((prev) => {
           if (prev && prev.email === updated.user?.email) return prev;

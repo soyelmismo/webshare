@@ -9,6 +9,7 @@ import { Worker } from "worker_threads";
 import { spawn, execSync, type ChildProcess } from "child_process";
 import { Readable } from "stream";
 import { streamManager } from "./server/streamManager.js";
+import { rcloneAuthManager } from "./server/rcloneAuth.js";
 import { sequentialChunkEngine } from "./server/sequentialEngine.js";
 import {
   createThrottledByteStream,
@@ -1857,6 +1858,111 @@ app.use(express.json({ limit: "50mb" }));
       success: true,
       transfer: transferTask,
     });
+  });
+
+  // --- RCLONE & PERMANENT AUTO-REFRESH TOKENS ---
+  app.get("/api/drive/rclone/status", async (req, res) => {
+    try {
+      await rcloneAuthManager.scanSystemRcloneConf();
+      const remotes = rcloneAuthManager.listRemotes();
+      const active = rcloneAuthManager.getActiveAccount();
+      res.json({
+        available: remotes.length > 0,
+        remotes,
+        activeRemote: active?.remoteName,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || "Error al obtener estado de rclone" });
+    }
+  });
+
+  app.post("/api/drive/rclone/use", async (req, res) => {
+    try {
+      const { remoteName, email } = req.body;
+      const target = remoteName || email;
+      if (remoteName) {
+        rcloneAuthManager.setActiveRemote(remoteName);
+      }
+      const token = await rcloneAuthManager.getValidAccessToken(target);
+      if (!token) {
+        return res.status(404).json({ error: "No se pudo obtener un token válido para el remote de rclone." });
+      }
+      const acc = rcloneAuthManager.getActiveAccount();
+      if (acc) {
+        streamManager.recordAccountToken(token, acc.email);
+        streamManager.dispatchQueue();
+      }
+      res.json({
+        success: true,
+        token,
+        account: acc,
+        user: acc
+          ? {
+              uid: acc.email,
+              email: acc.email,
+              displayName: acc.displayName,
+              photoURL: acc.photoURL,
+            }
+          : null,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || "Error al activar cuenta de rclone" });
+    }
+  });
+
+  app.post("/api/drive/rclone/import", async (req, res) => {
+    try {
+      const { content, name } = req.body;
+      if (!content || !content.trim()) {
+        return res.status(400).json({ error: "El contenido de configuración de rclone no puede estar vacío." });
+      }
+      const account = await rcloneAuthManager.importFromText(content, name);
+      streamManager.recordAccountToken(account.accessToken, account.email);
+      streamManager.dispatchQueue();
+      res.json({
+        success: true,
+        token: account.accessToken,
+        account,
+        user: {
+          uid: account.email,
+          email: account.email,
+          displayName: account.displayName,
+          photoURL: account.photoURL,
+        },
+      });
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || "Error al importar cuenta de rclone" });
+    }
+  });
+
+  app.post("/api/drive/rclone/remove", (req, res) => {
+    try {
+      const { nameOrEmail } = req.body;
+      const removed = rcloneAuthManager.removeAccount(nameOrEmail);
+      res.json({ success: removed });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/drive/rclone/active-token", async (req, res) => {
+    try {
+      const { email } = req.query;
+      const token = await rcloneAuthManager.getValidAccessToken(email as string);
+      const acc = rcloneAuthManager.getActiveAccount();
+      if (!token || !acc) {
+        return res.status(404).json({ error: "No hay cuenta activa de rclone" });
+      }
+      res.json({
+        token,
+        expiresAt: acc.expiresAt,
+        email: acc.email,
+        displayName: acc.displayName,
+        photoURL: acc.photoURL,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   // --- ZERO-DISK CONTINUOUS STREAMING TO GOOGLE DRIVE API ENDPOINTS ---

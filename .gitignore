@@ -7,3 +7,4 @@ coverage/
 .env*
 !.env.example
 .stream_tasks_cache.json
+.rclone_accounts_cache.json

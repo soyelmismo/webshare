@@ -233,3 +233,85 @@ export async function resumeBatchStreamTasks(params: {
   return Boolean(data.success);
 }
 
+export interface RcloneRemoteSummary {
+  remoteName: string;
+  email: string;
+  displayName: string;
+  photoURL?: string;
+  hasRefreshToken: boolean;
+  expiresAt: number;
+  minutesRemaining: number;
+  source: "system_rclone_conf" | "manual_import";
+  storageLimit?: number;
+  storageUsage?: number;
+}
+
+export async function fetchRcloneStatus(): Promise<{
+  available: boolean;
+  remotes: RcloneRemoteSummary[];
+  activeRemote?: string;
+}> {
+  try {
+    const res = await fetch("/api/drive/rclone/status");
+    if (!res.ok) return { available: false, remotes: [] };
+    return await res.json();
+  } catch {
+    return { available: false, remotes: [] };
+  }
+}
+
+export async function useRcloneAccount(params: {
+  remoteName?: string;
+  email?: string;
+}): Promise<{
+  success: boolean;
+  token: string;
+  account: any;
+  user: any;
+}> {
+  const res = await fetch("/api/drive/rclone/use", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || "Error al activar cuenta de rclone");
+  }
+  return await res.json();
+}
+
+export async function importRcloneInput(params: {
+  content: string;
+  name?: string;
+}): Promise<{
+  success: boolean;
+  token: string;
+  account: any;
+  user: any;
+}> {
+  const res = await fetch("/api/drive/rclone/import", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || "Error al importar configuración de rclone");
+  }
+  return await res.json();
+}
+
+export async function removeRcloneAccount(nameOrEmail: string): Promise<boolean> {
+  try {
+    const res = await fetch("/api/drive/rclone/remove", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ nameOrEmail }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+

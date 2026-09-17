@@ -2,6 +2,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { BoundedMemoryChunkStore } from "./memoryStore.js";
+import { rcloneAuthManager } from "./rcloneAuth.js";
 import { StreamDriveTask, StreamManifestData, DriveSessionAuditResult } from "../src/types.js";
 import {
   inspectAnySource,
@@ -296,6 +297,20 @@ export class StreamTransferManager {
     return this.activeAccountTokens.get("__default__");
   }
 
+  /**
+   * Asynchronously resolves a fresh, auto-refreshed access token via Rclone/OAuth manager.
+   */
+  public async getAccountTokenAsync(accountEmail?: string): Promise<string | undefined> {
+    try {
+      const rcloneToken = await rcloneAuthManager.getValidAccessToken(accountEmail);
+      if (rcloneToken) {
+        this.recordAccountToken(rcloneToken, accountEmail);
+        return rcloneToken;
+      }
+    } catch {}
+    return this.getAccountToken(accountEmail);
+  }
+
   public getMaxConcurrentDownloads(): number {
     return this.maxConcurrentDownloads;
   }
@@ -346,7 +361,7 @@ export class StreamTransferManager {
       let promotedCount = 0;
       for (const task of queuedTasks) {
         if (promotedCount >= availableSlots) break;
-        const token = this.getAccountToken(task.accountEmail);
+        const token = (await this.getAccountTokenAsync(task.accountEmail)) || this.getAccountToken(task.accountEmail);
         if (!token) {
           continue;
         }
@@ -1787,11 +1802,20 @@ export class StreamTransferManager {
 
     // 2. On-demand Google Drive Resumable Session Initialization
     if (!task.resumableUploadUrl) {
+      let effectiveToken = accessToken;
+      try {
+        const fresh = await rcloneAuthManager.getValidAccessToken(task.accountEmail);
+        if (fresh) {
+          effectiveToken = fresh;
+          this.recordAccountToken(fresh, task.accountEmail);
+        }
+      } catch {}
+
       try {
         console.log(`[StreamManager] Inicializando sesión de Google Drive bajo demanda para tarea en cola: ${task.fileName}`);
 
         // Ensure nested folder hierarchy exists in Drive if not yet resolved
-        if (task.selectedFilePath && accessToken) {
+        if (task.selectedFilePath && effectiveToken) {
           const cleanPath = task.selectedFilePath.replace(/\\/g, "/");
           const pathParts = cleanPath.split("/").filter(Boolean);
           if (pathParts.length > 1) {
@@ -1799,7 +1823,7 @@ export class StreamTransferManager {
             const baseFolder = task.rootFolderId || activeFolderId || "root";
             try {
               const targetFolderId = await this.ensureDriveFolderHierarchy(
-                accessToken,
+                effectiveToken,
                 baseFolder,
                 dirHierarchy
               );
@@ -1811,7 +1835,7 @@ export class StreamTransferManager {
         }
 
         const sessionUri = await this.initDriveResumableUpload(
-          accessToken,
+          effectiveToken,
           task.driveFolderId,
           task.fileName,
           task.fileSize
@@ -1820,7 +1844,7 @@ export class StreamTransferManager {
 
         // Create manifest on Drive (only for standalone single-file tasks; batches have a single consolidated manifest)
         if (!task.batchId) {
-          const manifestId = await this.saveManifestToDrive(accessToken, task.driveFolderId, {
+          const manifestId = await this.saveManifestToDrive(effectiveToken, task.driveFolderId, {
             version: 1,
             taskId: task.id,
             accountEmail: task.accountEmail,
@@ -1855,6 +1879,15 @@ export class StreamTransferManager {
           return false;
         }
         if (err.message?.includes("401") || err.message?.includes("expirado") || err.message?.includes("Invalid Credentials")) {
+          try {
+            const refreshed = await rcloneAuthManager.forceRefreshToken(task.accountEmail);
+            if (refreshed) {
+              console.log(`[StreamManager] Token auto-renovado con éxito tras 401 para ${task.fileName}. Reintentando sesión de Drive.`);
+              this.recordAccountToken(refreshed, task.accountEmail);
+              return await this.processNextChunk(taskId, refreshed, activeFolderId, activeAccountEmail);
+            }
+          } catch {}
+
           console.warn(`[StreamManager] Token de Google Drive expirado (401) para tarea "${task.fileName}". Permanece en cola esperando reconexión.`);
           task.status = "queued";
           task.error = "Sesión de Google Drive expirada (401). Reconecta tu cuenta en el panel para continuar la cola.";
@@ -2043,6 +2076,19 @@ export class StreamTransferManager {
     } catch (err: any) {
       console.warn(`[StreamManager] Error procesando chunk para ${taskId}:`, err?.message);
       (task as any).needsCommittedSync = true;
+
+      // Handle 401 token expiration during chunk upload or sync
+      if (err?.message?.includes("401") || err?.message?.includes("expirado") || err?.message?.includes("Invalid Credentials")) {
+        try {
+          const refreshed = await rcloneAuthManager.forceRefreshToken(task.accountEmail);
+          if (refreshed) {
+            console.log(`[StreamManager] Token auto-renovado tras error 401 en chunk para ${task.fileName}. Reintentando chunk.`);
+            this.recordAccountToken(refreshed, task.accountEmail);
+            return await this.processNextChunk(taskId, refreshed, activeFolderId, activeAccountEmail);
+          }
+        } catch {}
+      }
+
       task.error = err?.message;
       return false;
     } finally {

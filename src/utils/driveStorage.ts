@@ -344,8 +344,11 @@ export function loadDriveSession(): StoredDriveSession {
   }
 
   const now = Date.now();
-  const isExpired = expiresAt ? now > expiresAt : false;
-  const minutesRemaining = expiresAt ? Math.max(0, Math.round((expiresAt - now) / 60000)) : 60;
+  const isAutoRenew = Boolean(activeAccount?.isAutoRenew);
+  const isExpired = isAutoRenew ? false : (expiresAt ? now > expiresAt : false);
+  const minutesRemaining = isAutoRenew
+    ? 999999
+    : (expiresAt ? Math.max(0, Math.round((expiresAt - now) / 60000)) : 60);
 
   return {
     token,
@@ -492,3 +495,39 @@ export async function verifyDriveToken(token: string): Promise<{
     };
   }
 }
+
+/**
+ * Synchronizes the active Google Drive token from the backend if it is an auto-renewing Rclone account.
+ */
+export async function syncRcloneActiveToken(): Promise<string | null> {
+  const active = getActiveAccount();
+  if (!active || !active.isAutoRenew) return null;
+  try {
+    const emailParam = active.email ? `?email=${encodeURIComponent(active.email)}` : "";
+    const res = await fetch(`/api/drive/rclone/active-token${emailParam}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.token) {
+      if (data.token !== active.token || (data.expiresAt && data.expiresAt !== active.expiresAt)) {
+        active.token = data.token;
+        if (data.expiresAt) active.expiresAt = data.expiresAt;
+        saveGoogleAccount(active, true);
+      }
+      return data.token;
+    }
+  } catch (e) {
+    console.warn("Error sincronizando token de rclone:", e);
+  }
+  return null;
+}
+
+// Background sync for auto-renewing rclone accounts
+if (typeof window !== "undefined") {
+  setInterval(() => {
+    const active = getActiveAccount();
+    if (active?.isAutoRenew) {
+      syncRcloneActiveToken().catch(() => {});
+    }
+  }, 4 * 60 * 1000);
+}
+

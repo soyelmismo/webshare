@@ -209,6 +209,8 @@ export interface SavedGoogleAccount {
   expiresAt: number | null;
   folder: DriveFolderInfo | null;
   addedAt: number;
+  isAutoRenew?: boolean;
+  remoteName?: string;
 }
 
 export interface SequentialEngineStatus {

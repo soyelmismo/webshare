@@ -17,9 +17,25 @@ import {
   ArrowRightLeft,
   Mail,
   User as UserIcon,
+  Cloud,
+  Sparkles,
 } from "lucide-react";
-import { StoredDriveSession, loadDriveSession, getClientCookie, verifyDriveToken, onDriveSessionChange } from "../utils/driveStorage";
+import {
+  StoredDriveSession,
+  loadDriveSession,
+  getClientCookie,
+  verifyDriveToken,
+  onDriveSessionChange,
+  saveGoogleAccount,
+} from "../utils/driveStorage";
 import { SavedGoogleAccount } from "../types";
+import {
+  fetchRcloneStatus,
+  useRcloneAccount,
+  importRcloneInput,
+  removeRcloneAccount,
+  RcloneRemoteSummary,
+} from "../utils/streamApi";
 
 interface DriveCookieModalProps {
   isOpen: boolean;
@@ -73,6 +89,31 @@ export const DriveCookieModal: React.FC<DriveCookieModalProps> = ({
   const [isAddingGoogle, setIsAddingGoogle] = useState(false);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
 
+  // Rclone integration state
+  const [rcloneRemotes, setRcloneRemotes] = useState<RcloneRemoteSummary[]>([]);
+  const [isLoadingRclone, setIsLoadingRclone] = useState(false);
+  const [activatingRemote, setActivatingRemote] = useState<string | null>(null);
+
+  const loadRcloneRemotes = async () => {
+    setIsLoadingRclone(true);
+    try {
+      const status = await fetchRcloneStatus();
+      if (status && status.remotes) {
+        setRcloneRemotes(status.remotes);
+      }
+    } catch (e) {
+      console.warn("Error cargando remotes de rclone:", e);
+    } finally {
+      setIsLoadingRclone(false);
+    }
+  };
+
+  useEffect(() => {
+    if (isOpen) {
+      loadRcloneRemotes();
+    }
+  }, [isOpen]);
+
   if (!isOpen) return null;
 
   const cookieVal = getClientCookie("gdrive_access_token");
@@ -91,8 +132,30 @@ export const DriveCookieModal: React.FC<DriveCookieModalProps> = ({
 
   const handleRenewClick = async () => {
     setIsRenewing(true);
+    setVerifyError(null);
+    setVerifySuccess(null);
     try {
+      if (session?.activeAccount?.isAutoRenew) {
+        const res = await useRcloneAccount({
+          remoteName: session.activeAccount.remoteName,
+          email: session.activeAccount.email,
+        });
+        if (res.token) {
+          saveGoogleAccount(
+            {
+              ...session.activeAccount,
+              token: res.token,
+              expiresAt: res.account?.expiresAt || Date.now() + 3600 * 1000,
+            },
+            true
+          );
+          setVerifySuccess("¡Token Rclone renovado exitosamente desde el servidor!");
+          return;
+        }
+      }
       await onRenew();
+    } catch (e: any) {
+      setVerifyError(e.message || "Error al renovar token");
     } finally {
       setIsRenewing(false);
     }
@@ -116,6 +179,46 @@ export const DriveCookieModal: React.FC<DriveCookieModalProps> = ({
     }
   };
 
+  const handleRemove = async (acc: SavedGoogleAccount) => {
+    if (acc.isAutoRenew) {
+      await removeRcloneAccount(acc.remoteName || acc.email);
+    }
+    await onRemoveAccount(acc.id);
+    loadRcloneRemotes();
+  };
+
+  const handleActivateRcloneRemote = async (remote: RcloneRemoteSummary) => {
+    setActivatingRemote(remote.remoteName);
+    setVerifyError(null);
+    setVerifySuccess(null);
+    try {
+      const res = await useRcloneAccount({ remoteName: remote.remoteName });
+      if (!res.success || !res.token) {
+        throw new Error("No se pudo obtener token de la cuenta de Rclone");
+      }
+      const accId = res.user?.email || res.account?.email || remote.remoteName;
+      const newAcc: SavedGoogleAccount = {
+        id: accId,
+        displayName: res.user?.displayName || res.account?.displayName || remote.remoteName,
+        email: res.user?.email || res.account?.email || `${remote.remoteName}@rclone`,
+        photoURL: res.user?.photoURL,
+        token: res.token,
+        expiresAt: res.account?.expiresAt || Date.now() + 3600 * 1000,
+        isAutoRenew: true,
+        remoteName: remote.remoteName,
+        folder: null,
+        addedAt: Date.now(),
+      };
+      saveGoogleAccount(newAcc, true);
+      setVerifySuccess(`¡Cuenta Rclone '${remote.remoteName}' (${newAcc.email}) activada con auto-renovación 24/7!`);
+      loadRcloneRemotes();
+    } catch (e: any) {
+      setVerifyError(e.message || "Error al activar cuenta de Rclone");
+    } finally {
+      setActivatingRemote(null);
+    }
+  };
+
   const handleVerifyAndSave = async (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = manualInput.trim();
@@ -124,6 +227,49 @@ export const DriveCookieModal: React.FC<DriveCookieModalProps> = ({
     setIsVerifying(true);
     setVerifyError(null);
     setVerifySuccess(null);
+
+    // Detect if input is Rclone INI config, token JSON, or refresh_token
+    const isRcloneInput =
+      trimmed.startsWith("{") ||
+      trimmed.includes("[") ||
+      trimmed.includes("refresh_token") ||
+      trimmed.startsWith("1//");
+
+    if (isRcloneInput) {
+      try {
+        const res = await importRcloneInput({
+          content: trimmed,
+          name: manualName.trim() || undefined,
+        });
+        if (!res.success || !res.token) {
+          throw new Error("No se pudo importar o refrescar el token de Rclone");
+        }
+        const accId = res.user?.email || res.account?.email || `rclone-${Date.now().toString().slice(-4)}`;
+        const newAcc: SavedGoogleAccount = {
+          id: accId,
+          displayName: res.user?.displayName || manualName.trim() || res.account?.displayName || "Cuenta Rclone",
+          email: res.user?.email || res.account?.email || (manualEmail.trim() || `${accId}@rclone`),
+          photoURL: res.user?.photoURL,
+          token: res.token,
+          expiresAt: res.account?.expiresAt || Date.now() + 3600 * 1000,
+          isAutoRenew: true,
+          remoteName: res.account?.remoteName,
+          folder: null,
+          addedAt: Date.now(),
+        };
+        saveGoogleAccount(newAcc, true);
+        setVerifySuccess(`¡Configuración Rclone importada con éxito para ${newAcc.email}! Se auto-renovará 24/7 en segundo plano.`);
+        setManualInput("");
+        setManualEmail("");
+        setManualName("");
+        loadRcloneRemotes();
+      } catch (err: any) {
+        setVerifyError(err?.message || "Error al procesar configuración de Rclone.");
+      } finally {
+        setIsVerifying(false);
+      }
+      return;
+    }
 
     try {
       const result = await verifyDriveToken(trimmed);
@@ -157,13 +303,14 @@ export const DriveCookieModal: React.FC<DriveCookieModalProps> = ({
             </div>
             <div>
               <h3 className="text-sm font-bold text-[#f3f4f6] flex items-center gap-2">
-                <span>Multi-Cuentas & Cookies Google Drive</span>
-                <span className="px-2 py-0.5 rounded text-[10px] bg-[#161a1f] text-[#10b981] border border-[#262b32] font-mono">
-                  Client-Side
+                <span>Multi-Cuentas & Tokens Google Drive</span>
+                <span className="px-2 py-0.5 rounded text-[10px] bg-[#064e3b]/40 text-[#34d399] border border-[#059669]/50 font-mono font-bold flex items-center gap-1">
+                  <Sparkles className="w-2.5 h-2.5" />
+                  Auto-Renew 24/7 (Rclone)
                 </span>
               </h3>
               <p className="text-xs text-[#9ca3af]">
-                Gestiona múltiples cuentas de Google y almacena credenciales locales de sesión.
+                Gestiona cuentas, auto-renovación infinita mediante Rclone y cookies persistentes.
               </p>
             </div>
           </div>
@@ -177,6 +324,124 @@ export const DriveCookieModal: React.FC<DriveCookieModalProps> = ({
 
         {/* Body Content */}
         <div className="overflow-y-auto py-4 space-y-4 flex-1 pr-1">
+          {/* Rclone Auto-Renew Section */}
+          <div className="p-3.5 rounded-xl bg-[#0e1013] border border-[#10b981]/30 space-y-3 relative overflow-hidden">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Cloud className="w-4 h-4 text-[#10b981]" />
+                <h4 className="text-xs font-bold text-[#f3f4f6] uppercase tracking-wide flex items-center gap-2">
+                  <span>Tokens Rclone (Auto-Renovación Permanente)</span>
+                  <span className="px-1.5 py-0.5 rounded text-[9px] bg-[#10b981]/20 text-[#10b981] border border-[#10b981]/30 font-bold">
+                    RECOMENDADO
+                  </span>
+                </h4>
+              </div>
+              <button
+                onClick={loadRcloneRemotes}
+                disabled={isLoadingRclone}
+                className="p-1 rounded text-[#9ca3af] hover:text-[#f3f4f6] transition-colors cursor-pointer"
+                title="Volver a escanear remotes del servidor"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isLoadingRclone ? "animate-spin text-[#10b981]" : ""}`} />
+              </button>
+            </div>
+
+            <p className="text-[11px] text-[#9ca3af] leading-relaxed">
+              Los tokens de <code className="text-[#10b981] font-mono">rclone.conf</code> se renuevan automáticamente en el backend cada hora, eliminando para siempre las desconexiones y caídas a mitad de subida.
+            </p>
+
+            {isLoadingRclone && rcloneRemotes.length === 0 ? (
+              <div className="p-3 text-center text-xs text-[#9ca3af] flex items-center justify-center gap-2">
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-[#10b981]" />
+                <span>Detectando remotes en el sistema...</span>
+              </div>
+            ) : rcloneRemotes.length > 0 ? (
+              <div className="space-y-2">
+                {rcloneRemotes.map((rem) => {
+                  const isCurrentActive =
+                    session?.activeAccount?.isAutoRenew &&
+                    (session.activeAccount.remoteName === rem.remoteName ||
+                      session.activeAccount.email === rem.email);
+
+                  return (
+                    <div
+                      key={rem.remoteName}
+                      className={`p-2.5 rounded-lg border flex items-center justify-between gap-3 transition-colors ${
+                        isCurrentActive
+                          ? "bg-[#13221b] border-[#10b981]/60"
+                          : "bg-[#14171a] border-[#22272e] hover:border-[#2f3540]"
+                      }`}
+                    >
+                      <div className="min-w-0 flex items-center gap-2.5">
+                        <div className="w-7 h-7 rounded-lg bg-[#1a231f] border border-[#10b981]/40 flex items-center justify-center text-[#10b981] font-bold text-xs shrink-0">
+                          ☁️
+                        </div>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold text-[#f3f4f6] font-mono">
+                              [{rem.remoteName}]
+                            </span>
+                            {rem.displayName && (
+                              <span className="text-xs text-[#9ca3af] truncate max-w-[140px]">
+                                {rem.displayName}
+                              </span>
+                            )}
+                            <span className="px-1.5 py-0.2 rounded text-[9px] bg-[#064e3b]/40 text-[#34d399] border border-[#059669]/40 font-mono font-bold">
+                              Auto-Renew 24/7
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 text-[11px] text-[#9ca3af] font-mono truncate">
+                            <span>{rem.email || "Sin email"}</span>
+                            {rem.storageLimit && (
+                              <>
+                                <span>•</span>
+                                <span>
+                                  Cuota: {rem.storageUsage ? (rem.storageUsage / 1024 ** 4).toFixed(1) : 0} /{" "}
+                                  {(rem.storageLimit / 1024 ** 4).toFixed(1)} TB
+                                </span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {isCurrentActive ? (
+                          <span className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-[#10b981]/20 text-[#10b981] border border-[#10b981]/40 text-xs font-bold font-mono">
+                            <Check className="w-3.5 h-3.5" />
+                            <span>En Uso</span>
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => handleActivateRcloneRemote(rem)}
+                            disabled={activatingRemote === rem.remoteName}
+                            className="flex items-center gap-1.5 px-3 py-1 rounded-md bg-[#10b981] hover:bg-[#059669] text-[#0b0d0e] text-xs font-bold transition-colors cursor-pointer disabled:opacity-50 shadow-sm"
+                          >
+                            {activatingRemote === rem.remoteName ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <RefreshCw className="w-3.5 h-3.5" />
+                            )}
+                            <span>Conectar y Activar</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="p-3 rounded-lg bg-[#14171a] border border-dashed border-[#262b32] text-center space-y-1">
+                <p className="text-xs text-[#9ca3af]">
+                  No se detectó un archivo <code className="font-mono text-[#f3f4f6]">~/.config/rclone/rclone.conf</code> con remotes tipo drive en este servidor.
+                </p>
+                <p className="text-[11px] text-[#6b7280]">
+                  Puedes pegar tu bloque de configuración <code className="font-mono text-[#9ca3af]">[remote]</code> o el JSON de tokens de tu otro servidor abajo en el formulario manual.
+                </p>
+              </div>
+            )}
+          </div>
+
           {/* Linked Accounts Section */}
           <div className="p-3.5 rounded-xl bg-[#0e1013] border border-[#22272e] space-y-3">
             <div className="flex items-center justify-between">
@@ -196,7 +461,7 @@ export const DriveCookieModal: React.FC<DriveCookieModalProps> = ({
                 ) : (
                   <UserPlus className="w-3.5 h-3.5 text-[#10b981]" />
                 )}
-                <span>+ Agregar otra cuenta</span>
+                <span>+ Agregar por Google OAuth</span>
               </button>
             </div>
 
@@ -215,7 +480,8 @@ export const DriveCookieModal: React.FC<DriveCookieModalProps> = ({
               <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
                 {accounts.map((acc: SavedGoogleAccount) => {
                   const isActive = acc.id === activeAccountId || acc.email === activeAccountId;
-                  const isAccountExpired = acc.expiresAt ? Date.now() > acc.expiresAt : false;
+                  const isAutoRenew = Boolean(acc.isAutoRenew);
+                  const isAccountExpired = !isAutoRenew && acc.expiresAt ? Date.now() > acc.expiresAt : false;
                   const minsRemaining = acc.expiresAt
                     ? Math.max(0, Math.round((acc.expiresAt - Date.now()) / 60000))
                     : 60;
@@ -253,13 +519,23 @@ export const DriveCookieModal: React.FC<DriveCookieModalProps> = ({
                                 ACTIVA
                               </span>
                             )}
+                            {isAutoRenew && (
+                              <span className="px-1.5 py-0.2 rounded text-[9px] bg-[#064e3b]/40 text-[#34d399] border border-[#059669]/40 font-bold font-mono flex items-center gap-1">
+                                <RefreshCw className="w-2.5 h-2.5" />
+                                <span>Rclone 24/7</span>
+                              </span>
+                            )}
                           </div>
                           <div className="flex items-center gap-2 text-[11px] text-[#9ca3af] font-mono truncate">
                             <span>{acc.email || acc.id}</span>
                             <span>•</span>
-                            <span className={isAccountExpired ? "text-[#f87171]" : "text-[#9ca3af]"}>
-                              {isAccountExpired ? "Expirado" : `~${minsRemaining}m`}
-                            </span>
+                            {isAutoRenew ? (
+                              <span className="text-[#34d399] font-medium">Permanente (Auto-refresh)</span>
+                            ) : (
+                              <span className={isAccountExpired ? "text-[#f87171]" : "text-[#9ca3af]"}>
+                                {isAccountExpired ? "Expirado" : `~${minsRemaining}m`}
+                              </span>
+                            )}
                           </div>
                         </div>
                       </div>
@@ -282,7 +558,7 @@ export const DriveCookieModal: React.FC<DriveCookieModalProps> = ({
                         )}
 
                         <button
-                          onClick={() => onRemoveAccount(acc.id)}
+                          onClick={() => handleRemove(acc)}
                           className="p-1.5 rounded-md bg-[#14171a] hover:bg-[#7f1d1d]/30 text-[#9ca3af] hover:text-[#f87171] border border-[#22272e] transition-colors cursor-pointer"
                           title="Desvincular esta cuenta"
                         >
@@ -303,7 +579,7 @@ export const DriveCookieModal: React.FC<DriveCookieModalProps> = ({
               <div className="flex items-center justify-between text-xs">
                 <span className="text-[#9ca3af] font-medium flex items-center gap-1.5">
                   <Cookie className="w-3.5 h-3.5 text-[#f59e0b]" />
-                  <span>Cookie Activa</span>
+                  <span>Cookie Local</span>
                 </span>
                 <span
                   className={`px-2 py-0.5 rounded text-[10px] font-mono font-semibold ${
@@ -353,6 +629,11 @@ export const DriveCookieModal: React.FC<DriveCookieModalProps> = ({
                   <span className="text-xs font-bold text-[#f3f4f6]">
                     Token Activo ({session?.user?.email || session?.activeAccount?.email || "Google Drive"})
                   </span>
+                  {session?.activeAccount?.isAutoRenew && (
+                    <span className="px-1.5 py-0.5 rounded text-[9px] bg-[#064e3b]/50 text-[#34d399] border border-[#059669]/50 font-mono font-bold">
+                      Auto-Renovación Activa
+                    </span>
+                  )}
                 </div>
                 <button
                   onClick={handleCopyToken}
@@ -384,7 +665,13 @@ export const DriveCookieModal: React.FC<DriveCookieModalProps> = ({
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#1f242c] hover:bg-[#28303b] border border-[#3b424d] text-[#f3f4f6] text-xs font-bold transition-colors cursor-pointer disabled:opacity-50"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${isRenewing ? "animate-spin text-[#10b981]" : ""}`} />
-                  <span>{isRenewing ? "Renovando..." : "Renovar Token Activo"}</span>
+                  <span>
+                    {isRenewing
+                      ? "Renovando..."
+                      : session?.activeAccount?.isAutoRenew
+                      ? "Refrescar Token Rclone Ahora"
+                      : "Renovar Token Activo"}
+                  </span>
                 </button>
 
                 <button
@@ -398,16 +685,18 @@ export const DriveCookieModal: React.FC<DriveCookieModalProps> = ({
             </div>
           )}
 
-          {/* Manual Token Form */}
+          {/* Manual Token / Rclone Import Form */}
           <div className="p-3.5 rounded-xl bg-[#0e1013] border border-[#22272e] space-y-3">
             <div className="flex items-center gap-2">
               <Key className="w-4 h-4 text-[#f59e0b]" />
               <h4 className="text-xs font-bold text-[#f3f4f6]">
-                Vincular Cuenta Manualmente (Token o Cookie)
+                Vincular Cuenta Manualmente (Access Token o Rclone Config / JSON)
               </h4>
             </div>
             <p className="text-[11px] text-[#9ca3af] leading-relaxed">
-              Puedes agregar cuentas adicionales mediante un Access Token OAuth2 o Cookie de Google Drive sin sobrescribir las existentes.
+              Puedes pegar un <code className="font-mono text-[#f3f4f6]">Access Token (ya29...)</code>, un bloque INI de{" "}
+              <code className="font-mono text-[#10b981]">rclone.conf</code> (<code className="font-mono">[gdrive]...</code>), o el{" "}
+              <code className="font-mono text-[#10b981]">JSON con refresh_token</code>. Si contiene credenciales de Rclone, se auto-renovará 24/7 en segundo plano.
             </p>
 
             <form onSubmit={handleVerifyAndSave} className="space-y-3">
@@ -428,7 +717,7 @@ export const DriveCookieModal: React.FC<DriveCookieModalProps> = ({
                     type="text"
                     value={manualName}
                     onChange={(e) => setManualName(e.target.value)}
-                    placeholder="Etiqueta (ej. Cuenta Personal / Trabajo)"
+                    placeholder="Etiqueta (ej. Cuenta Personal / Rclone Server)"
                     className="w-full pl-8 pr-3 py-2 rounded-lg bg-[#14171a] border border-[#22272e] focus:border-[#3b424d] text-xs text-[#f3f4f6] placeholder-[#6b7280] outline-none"
                   />
                 </div>
@@ -437,8 +726,8 @@ export const DriveCookieModal: React.FC<DriveCookieModalProps> = ({
               <textarea
                 value={manualInput}
                 onChange={(e) => setManualInput(e.target.value)}
-                placeholder="Pega aquí el Access Token OAuth2 (ya29...) o Cookie de Drive..."
-                rows={2}
+                placeholder="Pega aquí el Access Token OAuth2 (ya29...), bloque de rclone.conf [remote] o JSON de tokens..."
+                rows={3}
                 disabled={isVerifying}
                 className="w-full p-2.5 rounded-lg bg-[#14171a] border border-[#22272e] focus:border-[#3b424d] text-xs font-mono text-[#f3f4f6] placeholder-[#6b7280] outline-none resize-none"
               />
@@ -466,12 +755,12 @@ export const DriveCookieModal: React.FC<DriveCookieModalProps> = ({
                   {isVerifying ? (
                     <>
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      <span>Verificando y Guardando...</span>
+                      <span>Verificando e Importando...</span>
                     </>
                   ) : (
                     <>
                       <Cookie className="w-3.5 h-3.5" />
-                      <span>Guardar Cuenta en Cookies</span>
+                      <span>Guardar e Importar Cuenta</span>
                     </>
                   )}
                 </button>
@@ -482,7 +771,7 @@ export const DriveCookieModal: React.FC<DriveCookieModalProps> = ({
 
         {/* Footer */}
         <div className="pt-3 border-t border-[#22272e] flex items-center justify-between text-[11px] text-[#9ca3af] font-mono shrink-0">
-          <span>Multi-cuentas: 100% Client-Side en tu navegador</span>
+          <span>Tokens & Rclone: Auto-Renovación en segundo plano 24/7</span>
           <button
             onClick={onClose}
             className="px-4 py-1.5 rounded-lg bg-[#1a1e24] hover:bg-[#222831] border border-[#262b32] text-[#f3f4f6] text-xs font-semibold transition-colors cursor-pointer"

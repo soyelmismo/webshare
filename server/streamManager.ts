@@ -652,7 +652,8 @@ export class StreamTransferManager {
    * while keeping the swarm connection alive so subsequent files start instantaneously.
    */
   public async destroyTorrentForTask(task: StreamDriveTask): Promise<void> {
-    const client = activeWebTorrentClient;
+    (task as any).prefetchedChunk = undefined;
+    const client = await getWebTorrentClient().catch(() => null);
     const candidates = [
       task.id,
       task.sourceUrl,
@@ -723,7 +724,19 @@ export class StreamTransferManager {
         this.torrentsMap.get(task.sourceUrl);
       if (!activeTorrent || !activeTorrent.store || !activeTorrent.pieceLength) return;
 
-      const fileOffset = ((activeTorrent.files && activeTorrent.files[0]) as any)?.offset || 0;
+      let targetFile: any = null;
+      if (task.selectedFilePath && Array.isArray(activeTorrent.files)) {
+        const cleanTarget = task.selectedFilePath.replace(/\\/g, "/").trim();
+        targetFile = activeTorrent.files.find((f: any) => {
+          const fPath = (f.path || "").replace(/\\/g, "/").trim();
+          return fPath === cleanTarget || fPath.endsWith("/" + cleanTarget) || cleanTarget.endsWith("/" + fPath);
+        });
+      }
+      if (!targetFile && Array.isArray(activeTorrent.files) && activeTorrent.files.length > 0) {
+        targetFile = activeTorrent.files[0];
+      }
+
+      const fileOffset = (targetFile as any)?.offset || 0;
       const confirmedPiece = Math.floor((fileOffset + committedBytes) / activeTorrent.pieceLength);
 
       if (typeof (activeTorrent.store as any).evictBefore === "function") {
@@ -1728,17 +1741,28 @@ export class StreamTransferManager {
       const end = Math.min(start + task.chunkSizeBytes, task.fileSize);
       const chunkLen = end - start;
 
-      // 1. Fetch chunk slice from source
-      let buf = await this.fetchSourceChunkSlice({
-        taskId: task.id,
-        sourceUrl: task.sourceUrl,
-        sourceType: task.sourceType,
-        start,
-        end,
-        torrentBase64: task.torrentBase64,
-        webSeeds: task.webSeeds,
-        activeMirrorUrl: task.activeMirrorUrl,
-      });
+      const abortSignal = this.abortControllers.get(task.id)?.signal;
+
+      // 1. Fetch chunk slice from source (consume prefetched buffer if available)
+      let buf: Buffer;
+      const prefetched = (task as any).prefetchedChunk;
+      if (prefetched && prefetched.start === start && prefetched.end === end) {
+        (task as any).prefetchedChunk = undefined;
+        buf = await prefetched.promise;
+      } else {
+        (task as any).prefetchedChunk = undefined;
+        buf = await this.fetchSourceChunkSlice({
+          taskId: task.id,
+          sourceUrl: task.sourceUrl,
+          sourceType: task.sourceType,
+          start,
+          end,
+          signal: abortSignal,
+          torrentBase64: task.torrentBase64,
+          webSeeds: task.webSeeds,
+          activeMirrorUrl: task.activeMirrorUrl,
+        });
+      }
 
       if (buf.length !== chunkLen) {
         if (end === task.fileSize && buf.length < chunkLen) {
@@ -1750,8 +1774,31 @@ export class StreamTransferManager {
         }
       }
 
-      // 2. Upload to Google Drive via PUT
+      // 2. High-Performance Double Buffering: While chunk [start, end] uploads to Google Drive,
+      // concurrently download next chunk [nextStart, nextEnd] from swarm/source into RAM!
+      const nextStart = end;
+      const nextEnd = Math.min(nextStart + task.chunkSizeBytes, task.fileSize);
+      if (nextStart < task.fileSize && !abortSignal?.aborted && task.status === "streaming") {
+        const nextPromise = this.fetchSourceChunkSlice({
+          taskId: task.id,
+          sourceUrl: task.sourceUrl,
+          sourceType: task.sourceType,
+          start: nextStart,
+          end: nextEnd,
+          signal: abortSignal,
+          torrentBase64: task.torrentBase64,
+          webSeeds: task.webSeeds,
+          activeMirrorUrl: task.activeMirrorUrl,
+        }).catch((err) => {
+          (task as any).prefetchedChunk = undefined;
+          throw err;
+        });
+        (task as any).prefetchedChunk = { start: nextStart, end: nextEnd, promise: nextPromise };
+      }
+
+      // 3. Upload to Google Drive via PUT
       const putTimeout = AbortSignal.timeout(60000);
+      const combinedPutSignal = abortSignal ? AbortSignal.any([abortSignal, putTimeout]) : putTimeout;
       const driveRes = await fetchWithRetry(task.resumableUploadUrl, {
         method: "PUT",
         headers: {
@@ -1759,7 +1806,7 @@ export class StreamTransferManager {
           "Content-Range": `bytes ${start}-${end - 1}/${task.fileSize}`,
         },
         body: buf,
-        signal: putTimeout,
+        signal: combinedPutSignal,
       });
 
       if (driveRes.status === 308 || driveRes.status === 200 || driveRes.status === 201) {
@@ -1896,6 +1943,7 @@ export class StreamTransferManager {
       }
     } finally {
       if (statsTimer) clearInterval(statsTimer);
+      (task as any).prefetchedChunk = undefined;
       this.abortControllers.delete(taskId);
       this.saveTasksToDisk();
       if (task.status === "completed" || task.status === "error" || task.status === "paused") {

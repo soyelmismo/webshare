@@ -68,17 +68,6 @@ export class SequentialChunkEngine {
       ) {
         return false;
       }
-      if (
-        folderId &&
-        folderId.trim() !== "" &&
-        folderId !== "root" &&
-        j.folderId &&
-        j.folderId.trim() !== "" &&
-        j.folderId !== "root" &&
-        j.folderId !== folderId
-      ) {
-        return false;
-      }
       return true;
     });
   }
@@ -725,9 +714,17 @@ export class SequentialChunkEngine {
   /**
    * Automatically resumes interrupted sequential streaming jobs when Google Drive session is available
    */
-  public autoResumePendingJobs(accessToken?: string, folderId?: string): SequentialStreamJob[] {
+  public autoResumePendingJobs(accessToken?: string, folderId?: string, accountEmail?: string): SequentialStreamJob[] {
     const resumed: SequentialStreamJob[] = [];
     for (const job of this.jobs.values()) {
+      if (
+        accountEmail &&
+        job.accountEmail &&
+        job.accountEmail.trim() !== "" &&
+        job.accountEmail.toLowerCase() !== accountEmail.trim().toLowerCase()
+      ) {
+        continue;
+      }
       if (
         (job.status === "paused" || job.status === "starting" || job.status === "streaming" || job.status === "downloading") &&
         job.downloadedBytes < job.totalBytes &&

@@ -232,9 +232,7 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
       for (const cj of cached) {
         if (!deletedIds.has(cj.id)) {
           const cjEmail = cj.rawStreamTask?.accountEmail || cj.rawSequentialJob?.accountEmail;
-          const cjFolder = cj.rawStreamTask?.driveFolderId || cj.rawSequentialJob?.folderId;
           if (activeAccountEmail && cjEmail && cjEmail.toLowerCase() !== activeAccountEmail.toLowerCase()) continue;
-          if (activeFolderId && cjFolder && cjFolder !== activeFolderId) continue;
           jobsMap.set(cj.id, cj);
         }
       }

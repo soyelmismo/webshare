@@ -1980,7 +1980,7 @@ app.use(express.json({ limit: "50mb" }));
       const { accessToken, folderId, accountEmail } = req.body;
       if (!accessToken) return res.status(400).json({ error: "Falta 'accessToken'" });
       const recovered = await streamManager.recoverFromDriveFolder(accessToken, folderId || "", accountEmail);
-      const resumedSequential = sequentialChunkEngine.autoResumePendingJobs(accessToken, folderId || "");
+      const resumedSequential = sequentialChunkEngine.autoResumePendingJobs(accessToken, folderId || "", accountEmail);
       res.json({
         success: true,
         recoveredCount: recovered.length,

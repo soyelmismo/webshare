@@ -484,17 +484,6 @@ export class StreamTransferManager {
       ) {
         return false;
       }
-      if (
-        folderId &&
-        folderId.trim() !== "" &&
-        folderId !== "root" &&
-        t.driveFolderId &&
-        t.driveFolderId.trim() !== "" &&
-        t.driveFolderId !== "root" &&
-        t.driveFolderId !== folderId
-      ) {
-        return false;
-      }
       return true;
     });
   }
@@ -1806,6 +1795,14 @@ export class StreamTransferManager {
     for (const [taskId, localTask] of this.tasks.entries()) {
       if (seenTaskIds.has(taskId)) continue;
       if (localTask.status === "completed") continue;
+      if (
+        accountEmail &&
+        localTask.accountEmail &&
+        localTask.accountEmail.trim() !== "" &&
+        localTask.accountEmail.toLowerCase() !== accountEmail.trim().toLowerCase()
+      ) {
+        continue;
+      }
 
       // If already streaming in memory, do not pause or disturb it!
       if (localTask.status === "streaming" && this.abortControllers.has(taskId)) {

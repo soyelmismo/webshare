@@ -114,7 +114,7 @@ export const DriveWorkspace: React.FC<DriveWorkspaceProps> = ({
 
       {/* Active Sub View */}
       <div>
-        {activeSubTab === "jobs" && (
+        <div className={activeSubTab === "jobs" ? "block" : "hidden"}>
           <UnifiedJobList
             session={driveSession}
             accessToken={activeToken}
@@ -123,8 +123,8 @@ export const DriveWorkspace: React.FC<DriveWorkspaceProps> = ({
             onOpenConnectModal={onOpenCookieModal}
             onRefreshFiles={() => {}}
           />
-        )}
-        {activeSubTab === "stream" && (
+        </div>
+        <div className={activeSubTab === "stream" ? "block" : "hidden"}>
           <DriveStreamDownloader
             session={driveSession}
             accessToken={activeToken}
@@ -134,21 +134,21 @@ export const DriveWorkspace: React.FC<DriveWorkspaceProps> = ({
             onOpenCookieModal={onOpenCookieModal}
             onNavigateToDriveTab={() => setActiveSubTab("cloud")}
           />
-        )}
-        {activeSubTab === "commander" && (
+        </div>
+        <div className={activeSubTab === "commander" ? "block" : "hidden"}>
           <FileCommander
             session={driveSession}
             accessToken={activeToken}
             onOpenCookieModal={onOpenCookieModal}
           />
-        )}
-        {activeSubTab === "cloud" && (
+        </div>
+        <div className={activeSubTab === "cloud" ? "block" : "hidden"}>
           <DriveDownloadClient
             serverSpecs={serverSpecs}
             benchmarkStats={benchmarkStats}
             onNavigateToCommander={() => setActiveSubTab("commander")}
           />
-        )}
+        </div>
       </div>
     </div>
   );

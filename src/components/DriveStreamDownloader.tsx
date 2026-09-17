@@ -27,7 +27,7 @@ import {
   cancelStreamJob,
   getStreamTasks,
 } from "../utils/streamClient";
-import { StoredDriveSession, loadDriveSession } from "../utils/driveStorage";
+import { StoredDriveSession, loadDriveSession, onDriveSessionChange } from "../utils/driveStorage";
 import { UnifiedJobList } from "./UnifiedJobList";
 
 interface DriveStreamDownloaderProps {
@@ -49,7 +49,22 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
   onOpenCookieModal,
   onNavigateToDriveTab,
 }) => {
-  const currentSession = propSession || loadDriveSession();
+  const [session, setSession] = useState<StoredDriveSession>(() => propSession || loadDriveSession());
+
+  useEffect(() => {
+    if (propSession) {
+      setSession(propSession);
+    }
+  }, [propSession]);
+
+  useEffect(() => {
+    const unsubscribe = onDriveSessionChange((updated) => {
+      setSession(updated);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const currentSession = session;
   const [url, setUrl] = useState("");
   const [customFilename, setCustomFilename] = useState("");
   const [chunkSizeMB, setChunkSizeMB] = useState(25);

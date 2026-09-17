@@ -14,7 +14,7 @@ import { SystemWorkspace, SystemSubTab } from "./components/SystemWorkspace";
 import { DriveWorkspace, DriveSubTab } from "./components/DriveWorkspace";
 import { PerformanceWorkspace, PerformanceSubTab } from "./components/PerformanceWorkspace";
 import { ReportModal } from "./components/ReportModal";
-import { loadDriveSession, StoredDriveSession } from "./utils/driveStorage";
+import { loadDriveSession, onDriveSessionChange, StoredDriveSession } from "./utils/driveStorage";
 import { recoverStreamTasksFromDrive } from "./utils/streamApi";
 import { Loader2, AlertCircle, RefreshCw, Server, Zap, CheckCircle2 } from "lucide-react";
 
@@ -35,6 +35,14 @@ export function App() {
   const serverSpecsRef = useRef<ServerSpecs | null>(serverSpecs);
   serverSpecsRef.current = serverSpecs;
   const initialRecoverTriggered = useRef(false);
+
+  // Subscribe to drive session & multi-account changes globally
+  useEffect(() => {
+    const unsubscribe = onDriveSessionChange((updatedSession) => {
+      setDriveSession(updatedSession);
+    });
+    return () => unsubscribe();
+  }, []);
 
   // Auto-recover transactions from Drive ONCE on initial app load / browser refresh
   useEffect(() => {

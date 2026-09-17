@@ -133,6 +133,8 @@ export function saveGoogleAccount(
 
   if (makeActive) {
     setActiveAccount(account.id);
+  } else {
+    notifyDriveSessionChanged();
   }
 
   return updatedAccounts;
@@ -175,6 +177,7 @@ export function setActiveAccount(accountId: string): SavedGoogleAccount | null {
   // Update client cookie
   setClientCookie(COOKIE_NAME, target.token, 365);
 
+  notifyDriveSessionChanged();
   return target;
 }
 
@@ -197,6 +200,7 @@ export function updateAccountFolder(accountId: string, folder: DriveFolderInfo) 
         console.warn("Error actualizando carpeta de cuenta:", e);
       }
     }
+    notifyDriveSessionChanged();
   }
 }
 
@@ -224,6 +228,7 @@ export function removeGoogleAccount(accountId: string): SavedGoogleAccount[] {
     }
   }
 
+  notifyDriveSessionChanged();
   return filtered;
 }
 
@@ -280,6 +285,8 @@ export function saveDriveSession(
       addedAt: Date.now(),
     };
     saveGoogleAccount(acc, true);
+  } else {
+    notifyDriveSessionChanged();
   }
 }
 
@@ -352,6 +359,41 @@ export function loadDriveSession(): StoredDriveSession {
   };
 }
 
+type SessionChangeListener = (session: StoredDriveSession) => void;
+const sessionChangeListeners: Set<SessionChangeListener> = new Set();
+
+export function notifyDriveSessionChanged() {
+  const currentSession = loadDriveSession();
+  sessionChangeListeners.forEach((fn) => {
+    try {
+      fn(currentSession);
+    } catch (e) {
+      console.warn("Error en listener de cambio de sesión de Drive:", e);
+    }
+  });
+}
+
+export function onDriveSessionChange(listener: SessionChangeListener): () => void {
+  sessionChangeListeners.add(listener);
+  return () => {
+    sessionChangeListeners.delete(listener);
+  };
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (e) => {
+    if (
+      e.key === STORAGE_ACCOUNTS_KEY ||
+      e.key === STORAGE_ACTIVE_ACCOUNT_KEY ||
+      e.key === STORAGE_TOKEN_KEY ||
+      e.key === STORAGE_USER_KEY ||
+      e.key === STORAGE_FOLDER_KEY
+    ) {
+      notifyDriveSessionChanged();
+    }
+  });
+}
+
 type ExpiryListener = (reason?: string) => void;
 const sessionExpiredListeners: Set<ExpiryListener> = new Set();
 
@@ -388,21 +430,29 @@ export function clearDriveSession() {
       console.warn("Error borrando sesión de localStorage:", e);
     }
   }
+
+  notifyDriveSessionChanged();
 }
 
 /**
  * Clears ALL accounts, cookies and stored sessions
  */
 export function clearAllDriveSessions() {
-  clearDriveSession();
+  deleteClientCookie(COOKIE_NAME);
   if (typeof window !== "undefined" && window.localStorage) {
     try {
+      localStorage.removeItem(STORAGE_TOKEN_KEY);
+      localStorage.removeItem(STORAGE_EXPIRES_KEY);
+      localStorage.removeItem(STORAGE_USER_KEY);
+      localStorage.removeItem(STORAGE_FOLDER_KEY);
       localStorage.removeItem(STORAGE_ACCOUNTS_KEY);
       localStorage.removeItem(STORAGE_ACTIVE_ACCOUNT_KEY);
     } catch (e) {
       console.warn("Error borrando todas las cuentas:", e);
     }
   }
+
+  notifyDriveSessionChanged();
 }
 
 /**

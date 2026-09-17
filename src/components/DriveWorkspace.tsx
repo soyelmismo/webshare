@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { CloudLightning, Columns2, CloudDownload, Activity } from "lucide-react";
 import { ServerSpecs, ServerBenchmarkStats } from "../types";
-import { StoredDriveSession } from "../utils/driveStorage";
+import { StoredDriveSession, loadDriveSession, onDriveSessionChange } from "../utils/driveStorage";
 import { DriveStreamDownloader } from "./DriveStreamDownloader";
 import { FileCommander } from "./FileCommander";
 import { DriveDownloadClient } from "./DriveDownloadClient";
@@ -19,20 +19,37 @@ interface DriveWorkspaceProps {
 }
 
 export const DriveWorkspace: React.FC<DriveWorkspaceProps> = ({
-  session,
-  accessToken,
+  session: propSession,
+  accessToken: propToken,
   serverSpecs,
   benchmarkStats,
   initialSubTab = "jobs",
   onOpenCookieModal,
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<DriveSubTab>(initialSubTab);
+  const [driveSession, setDriveSession] = useState<StoredDriveSession>(() => propSession || loadDriveSession());
+
+  useEffect(() => {
+    if (propSession) {
+      setDriveSession(propSession);
+    }
+  }, [propSession]);
+
+  useEffect(() => {
+    const unsubscribe = onDriveSessionChange((updated) => {
+      setDriveSession(updated);
+    });
+    return () => unsubscribe();
+  }, []);
 
   useEffect(() => {
     if (initialSubTab) {
       setActiveSubTab(initialSubTab);
     }
   }, [initialSubTab]);
+
+  const activeToken = propToken || driveSession?.token || null;
+  const activeUserEmail = driveSession?.user?.email || driveSession?.activeAccount?.email;
 
   return (
     <div className="space-y-4">
@@ -87,9 +104,9 @@ export const DriveWorkspace: React.FC<DriveWorkspaceProps> = ({
         >
           <CloudDownload className={`w-3.5 h-3.5 ${activeSubTab === "cloud" ? "text-[#8b5cf6]" : "text-[#6b7280]"}`} />
           <span>Cuentas & Presets</span>
-          {session?.user?.email && (
+          {activeUserEmail && (
             <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-[#0b0d0e] text-[#8b5cf6] border border-[#262b32] truncate max-w-[120px]">
-              {session.user.email}
+              {activeUserEmail}
             </span>
           )}
         </button>
@@ -99,20 +116,20 @@ export const DriveWorkspace: React.FC<DriveWorkspaceProps> = ({
       <div>
         {activeSubTab === "jobs" && (
           <UnifiedJobList
-            session={session}
-            accessToken={accessToken}
-            folderId={session?.folder?.id}
-            folderName={session?.folder?.name}
+            session={driveSession}
+            accessToken={activeToken}
+            folderId={driveSession?.folder?.id || driveSession?.activeAccount?.folder?.id}
+            folderName={driveSession?.folder?.name || driveSession?.activeAccount?.folder?.name}
             onOpenConnectModal={onOpenCookieModal}
             onRefreshFiles={() => {}}
           />
         )}
         {activeSubTab === "stream" && (
           <DriveStreamDownloader
-            session={session}
-            accessToken={accessToken}
-            folderId={session?.folder?.id}
-            folderName={session?.folder?.name || "Descargas Servidor"}
+            session={driveSession}
+            accessToken={activeToken}
+            folderId={driveSession?.folder?.id || driveSession?.activeAccount?.folder?.id}
+            folderName={driveSession?.folder?.name || driveSession?.activeAccount?.folder?.name || "Descargas Servidor"}
             onConnectDrive={() => setActiveSubTab("cloud")}
             onOpenCookieModal={onOpenCookieModal}
             onNavigateToDriveTab={() => setActiveSubTab("cloud")}
@@ -120,8 +137,8 @@ export const DriveWorkspace: React.FC<DriveWorkspaceProps> = ({
         )}
         {activeSubTab === "commander" && (
           <FileCommander
-            session={session}
-            accessToken={accessToken}
+            session={driveSession}
+            accessToken={activeToken}
             onOpenCookieModal={onOpenCookieModal}
           />
         )}

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   Cookie,
   ShieldCheck,
@@ -18,7 +18,7 @@ import {
   Mail,
   User as UserIcon,
 } from "lucide-react";
-import { StoredDriveSession, loadDriveSession, getClientCookie, verifyDriveToken } from "../utils/driveStorage";
+import { StoredDriveSession, loadDriveSession, getClientCookie, verifyDriveToken, onDriveSessionChange } from "../utils/driveStorage";
 import { SavedGoogleAccount } from "../types";
 
 interface DriveCookieModalProps {
@@ -46,7 +46,22 @@ export const DriveCookieModal: React.FC<DriveCookieModalProps> = ({
   onSaveManualToken,
   onClearSession,
 }) => {
-  const session = propSession || loadDriveSession();
+  const [driveSession, setDriveSession] = useState<StoredDriveSession>(() => propSession || loadDriveSession());
+
+  useEffect(() => {
+    if (propSession) {
+      setDriveSession(propSession);
+    }
+  }, [propSession]);
+
+  useEffect(() => {
+    const unsubscribe = onDriveSessionChange((updated) => {
+      setDriveSession(updated);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const session = driveSession;
   const [copied, setCopied] = useState(false);
   const [manualInput, setManualInput] = useState("");
   const [manualEmail, setManualEmail] = useState("");

@@ -54,6 +54,7 @@ import {
   StoredDriveSession,
   getClientCookie,
   onDriveSessionExpired,
+  onDriveSessionChange,
 } from "../utils/driveStorage";
 import {
   DEFAULT_FOLDER_NAME,
@@ -94,6 +95,37 @@ export const DriveDownloadClient: React.FC<DriveDownloadClientProps> = ({
     };
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  // Subscribe to drive session & account changes
+  useEffect(() => {
+    const unsubscribe = onDriveSessionChange((updated) => {
+      setDriveSession(updated);
+      if (updated?.user) {
+        setCurrentUser({
+          uid: updated.user.uid || "google-user",
+          displayName: updated.user.displayName,
+          email: updated.user.email,
+          photoURL: updated.user.photoURL,
+          emailVerified: true,
+          isAnonymous: false,
+          metadata: {},
+          providerData: [],
+          refreshToken: "",
+          tenantId: null,
+          delete: async () => {},
+          getIdToken: async () => "",
+          getIdTokenResult: async () => ({} as any),
+          reload: async () => {},
+          toJSON: () => ({}),
+          phoneNumber: null,
+          providerId: "google.com",
+        } as unknown as User);
+      } else {
+        setCurrentUser(null);
+      }
+    });
+    return () => unsubscribe();
   }, []);
 
   // Auth state

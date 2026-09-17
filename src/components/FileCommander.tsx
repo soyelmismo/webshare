@@ -23,7 +23,7 @@ import {
   Film,
   Music,
 } from "lucide-react";
-import { StoredDriveSession, loadDriveSession } from "../utils/driveStorage";
+import { StoredDriveSession, loadDriveSession, onDriveSessionChange } from "../utils/driveStorage";
 import { DriveFile } from "../types";
 import { listFilesInDedicatedFolder, deleteDriveFile } from "../utils/googleDriveApi";
 
@@ -43,10 +43,25 @@ interface FileCommanderProps {
 
 export const FileCommander: React.FC<FileCommanderProps> = ({
   session: propSession,
-  accessToken,
+  accessToken: propToken,
   onOpenCookieModal,
 }) => {
-  const session = propSession || loadDriveSession();
+  const [driveSession, setDriveSession] = useState<StoredDriveSession>(() => propSession || loadDriveSession());
+
+  useEffect(() => {
+    if (propSession) {
+      setDriveSession(propSession);
+    }
+  }, [propSession]);
+
+  useEffect(() => {
+    const unsubscribe = onDriveSessionChange((updated) => {
+      setDriveSession(updated);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const session = driveSession;
   // Left pane: Local Server Storage
   const [localPath, setLocalPath] = useState("/tmp");
   const [localFiles, setLocalFiles] = useState<LocalFileItem[]>([]);
@@ -64,7 +79,8 @@ export const FileCommander: React.FC<FileCommanderProps> = ({
   const [actionStatus, setActionStatus] = useState<string | null>(null);
   const [isTransferring, setIsTransferring] = useState(false);
 
-  const hasToken = Boolean(accessToken || session?.token);
+  const activeToken = propToken || session?.token || null;
+  const hasToken = Boolean(activeToken);
 
   // Fetch local files
   const fetchLocalFiles = async (dirPath: string) => {
@@ -84,11 +100,11 @@ export const FileCommander: React.FC<FileCommanderProps> = ({
 
   // Fetch drive files
   const fetchDriveFiles = async () => {
-    const token = accessToken || session?.token;
+    const token = activeToken;
     if (!token) return;
     setIsDriveLoading(true);
     try {
-      const files = await listFilesInDedicatedFolder(token, session?.dedicatedFolderId);
+      const files = await listFilesInDedicatedFolder(token, session?.folder?.id || session?.activeAccount?.folder?.id);
       setDriveFiles(files);
     } catch (e) {
       console.error(e);
@@ -105,11 +121,11 @@ export const FileCommander: React.FC<FileCommanderProps> = ({
     if (hasToken) {
       fetchDriveFiles();
     }
-  }, [hasToken, session?.dedicatedFolderId]);
+  }, [hasToken, session?.folder?.id, session?.activeAccount?.folder?.id]);
 
   const handleUploadSelectedToDrive = async () => {
     if (!selectedLocal) return;
-    const token = accessToken || session?.token;
+    const token = activeToken;
     if (!token) {
       onOpenCookieModal();
       return;

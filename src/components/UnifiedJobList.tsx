@@ -30,7 +30,7 @@ import {
   Folder,
 } from "lucide-react";
 import { SequentialStreamJob, StreamDriveTask } from "../types";
-import { StoredDriveSession, loadDriveSession, setActiveAccount } from "../utils/driveStorage";
+import { StoredDriveSession, loadDriveSession, setActiveAccount, onDriveSessionChange } from "../utils/driveStorage";
 import { googleSignIn } from "../utils/firebaseAuth";
 
 export interface UnifiedJobItem {
@@ -197,6 +197,13 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
     const session = propSession || loadDriveSession();
     setDriveSession(session);
   }, [propSession]);
+
+  useEffect(() => {
+    const unsubscribe = onDriveSessionChange((updated) => {
+      setDriveSession(updated);
+    });
+    return () => unsubscribe();
+  }, []);
 
   // Handle Recover Jobs from Google Drive
   const handleRecoverJobsFromDrive = async () => {

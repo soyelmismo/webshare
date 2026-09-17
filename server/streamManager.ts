@@ -1,5 +1,7 @@
 import fs from "fs";
+import os from "os";
 import path from "path";
+import MemoryChunkStore from "memory-chunk-store";
 import { StreamDriveTask, StreamManifestData, DriveSessionAuditResult } from "../src/types.js";
 import {
   inspectAnySource,
@@ -211,7 +213,23 @@ export class StreamTransferManager {
   private deletedTaskIds: Set<string> = new Set();
 
   constructor() {
+    this.cleanupDiskCache();
     this.loadTasksFromDisk();
+  }
+
+  /**
+   * Cleans up stale /tmp/webtorrent directory to maintain absolute 0-disk footprint.
+   */
+  public cleanupDiskCache(): void {
+    try {
+      const tmpWebtorrentDir = path.join(os.tmpdir(), "webtorrent");
+      if (fs.existsSync(tmpWebtorrentDir)) {
+        fs.rmSync(tmpWebtorrentDir, { recursive: true, force: true });
+        console.log("[StreamManager] 🧹 Limpiada la caché de disco /tmp/webtorrent.");
+      }
+    } catch (err) {
+      console.warn("[StreamManager] Error no fatal limpiando /tmp/webtorrent:", err);
+    }
   }
 
   /**
@@ -332,6 +350,7 @@ export class StreamTransferManager {
         }
 
         torrent = client.add(addInput, {
+          store: MemoryChunkStore,
           deselect: true,
           announce: DEFAULT_TRACKERS,
           maxWebConns: 16,
@@ -391,8 +410,22 @@ export class StreamTransferManager {
     return torrent;
   }
 
-  public getTasks(): StreamDriveTask[] {
-    return Array.from(this.tasks.values()).sort((a, b) => b.startedAt - a.startedAt);
+  public getTasks(folderId?: string, accountEmail?: string): StreamDriveTask[] {
+    const all = Array.from(this.tasks.values()).sort((a, b) => b.startedAt - a.startedAt);
+    return all.filter((t) => {
+      if (folderId && folderId.trim() !== "" && t.driveFolderId && t.driveFolderId !== folderId) {
+        return false;
+      }
+      if (
+        accountEmail &&
+        accountEmail.trim() !== "" &&
+        t.accountEmail &&
+        t.accountEmail.toLowerCase() !== accountEmail.toLowerCase()
+      ) {
+        return false;
+      }
+      return true;
+    });
   }
 
   public getTask(id: string): StreamDriveTask | undefined {
@@ -602,6 +635,7 @@ export class StreamTransferManager {
     sourceUrl: string;
     accessToken: string;
     folderId: string;
+    accountEmail?: string;
     customChunkSizeMB?: number;
     customFileName?: string;
     torrentBase64?: string;
@@ -612,6 +646,7 @@ export class StreamTransferManager {
       sourceUrl,
       accessToken,
       folderId,
+      accountEmail,
       customChunkSizeMB,
       customFileName,
       torrentBase64,
@@ -705,6 +740,7 @@ export class StreamTransferManager {
 
     const task: StreamDriveTask = {
       id: taskId,
+      accountEmail: accountEmail || undefined,
       fileName,
       sourceUrl,
       sourceType: inspected.sourceType,
@@ -736,6 +772,7 @@ export class StreamTransferManager {
       const manifestId = await this.saveManifestToDrive(accessToken, folderId, {
         version: 1,
         taskId,
+        accountEmail: accountEmail || undefined,
         fileName,
         sourceUrl,
         sourceType: inspected.sourceType,
@@ -767,9 +804,27 @@ export class StreamTransferManager {
   /**
    * Processes a single chunk for a task. Safe for both background loops and serverless polling triggers.
    */
-  public async processNextChunk(taskId: string, accessToken: string): Promise<boolean> {
+  public async processNextChunk(
+    taskId: string,
+    accessToken: string,
+    activeFolderId?: string,
+    activeAccountEmail?: string
+  ): Promise<boolean> {
     const task = this.tasks.get(taskId);
     if (!task || task.status !== "streaming" || (task as any).isProcessingChunk) {
+      return false;
+    }
+
+    // Work strictly on tasks belonging to the active account / folder
+    if (activeFolderId && activeFolderId.trim() !== "" && task.driveFolderId && task.driveFolderId !== activeFolderId) {
+      return false;
+    }
+    if (
+      activeAccountEmail &&
+      activeAccountEmail.trim() !== "" &&
+      task.accountEmail &&
+      task.accountEmail.toLowerCase() !== activeAccountEmail.toLowerCase()
+    ) {
       return false;
     }
 
@@ -1469,6 +1524,7 @@ export class StreamTransferManager {
       }
       this.tasks.delete(taskId);
       this.saveTasksToDisk();
+      this.cleanupDiskCache();
     }
 
     // Attempt to delete manifest from Drive if we have access token
@@ -1519,7 +1575,8 @@ export class StreamTransferManager {
    */
   public async recoverFromDriveFolder(
     accessToken: string,
-    folderId?: string
+    folderId?: string,
+    accountEmail?: string
   ): Promise<StreamDriveTask[]> {
     const recoveredTasks: StreamDriveTask[] = [];
     const seenTaskIds = new Set<string>();
@@ -1626,6 +1683,7 @@ export class StreamTransferManager {
 
         const recoveredTask: StreamDriveTask = {
           id: manifest.taskId,
+          accountEmail: manifest.accountEmail || accountEmail,
           fileName: manifest.fileName,
           sourceUrl: manifest.sourceUrl,
           sourceType: manifest.sourceType,

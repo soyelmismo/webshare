@@ -1080,7 +1080,9 @@ app.use(express.json({ limit: "50mb" }));
 
   // 2. List all sequential chunk download jobs
   const handleSequentialJobsList = (req: express.Request, res: express.Response) => {
-    const list = sequentialChunkEngine.getAllJobs();
+    const folderId = (req.query.folderId as string) || "";
+    const accountEmail = (req.query.accountEmail as string) || "";
+    const list = sequentialChunkEngine.getAllJobs(folderId, accountEmail);
     res.json(list);
   };
 
@@ -1143,6 +1145,7 @@ app.use(express.json({ limit: "50mb" }));
         destination: targetDest,
         accessToken: token,
         folderId: folder,
+        accountEmail: req.body?.accountEmail,
       });
 
       res.json({
@@ -1868,14 +1871,16 @@ app.use(express.json({ limit: "50mb" }));
 
   app.get("/api/stream/tasks", async (req, res) => {
     try {
-      let tasks = streamManager.getTasks();
       const authHeader = req.headers.authorization;
       const accessToken = authHeader ? authHeader.replace(/^Bearer\s+/i, "") : (req.query.accessToken as string);
       const folderId = (req.query.folderId as string) || "";
+      const accountEmail = (req.query.accountEmail as string) || "";
+
+      let tasks = streamManager.getTasks(folderId, accountEmail);
 
       // On serverless / cold start, if memory is empty and access token is present, auto-recover from Drive
       if (tasks.length === 0 && accessToken) {
-        tasks = await streamManager.recoverFromDriveFolder(accessToken, folderId);
+        tasks = await streamManager.recoverFromDriveFolder(accessToken, folderId, accountEmail);
       }
 
       // Serverless progress pump: process chunks continuously for up to 5s per polling request to achieve maximum speed
@@ -1884,12 +1889,14 @@ app.use(express.json({ limit: "50mb" }));
         for (const t of tasks) {
           if (t.status === "streaming") {
             while (Date.now() < endTime && t.status === "streaming") {
-              const processed = await streamManager.processNextChunk(t.id, accessToken).catch(() => false);
+              const processed = await streamManager
+                .processNextChunk(t.id, accessToken, folderId, accountEmail)
+                .catch(() => false);
               if (!processed) break;
             }
           }
         }
-        tasks = streamManager.getTasks();
+        tasks = streamManager.getTasks(folderId, accountEmail);
       }
 
       res.json(tasks);
@@ -1900,8 +1907,17 @@ app.use(express.json({ limit: "50mb" }));
 
   app.post("/api/stream/start", async (req, res) => {
     try {
-      const { sourceUrl, accessToken, folderId, customChunkSizeMB, customFileName,
-        torrentBase64, selectedFilePath, selectedFileSize } = req.body;
+      const {
+        sourceUrl,
+        accessToken,
+        folderId,
+        accountEmail,
+        customChunkSizeMB,
+        customFileName,
+        torrentBase64,
+        selectedFilePath,
+        selectedFileSize,
+      } = req.body;
       if (!sourceUrl) return res.status(400).json({ error: "Falta 'sourceUrl'" });
       if (!accessToken) return res.status(400).json({ error: "Falta 'accessToken' de Google Drive" });
 
@@ -1909,6 +1925,7 @@ app.use(express.json({ limit: "50mb" }));
         sourceUrl,
         accessToken,
         folderId: folderId || "",
+        accountEmail,
         customChunkSizeMB: customChunkSizeMB ? Number(customChunkSizeMB) : 16,
         customFileName,
         torrentBase64,
@@ -1960,9 +1977,9 @@ app.use(express.json({ limit: "50mb" }));
 
   app.post("/api/stream/recover", async (req, res) => {
     try {
-      const { accessToken, folderId } = req.body;
+      const { accessToken, folderId, accountEmail } = req.body;
       if (!accessToken) return res.status(400).json({ error: "Falta 'accessToken'" });
-      const recovered = await streamManager.recoverFromDriveFolder(accessToken, folderId || "");
+      const recovered = await streamManager.recoverFromDriveFolder(accessToken, folderId || "", accountEmail);
       const resumedSequential = sequentialChunkEngine.autoResumePendingJobs(accessToken, folderId || "");
       res.json({
         success: true,

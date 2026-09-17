@@ -12,6 +12,7 @@ export interface SequentialEngineStartOptions {
   destination?: "drive" | "server" | "both";
   accessToken?: string;
   folderId?: string;
+  accountEmail?: string;
   maxSpeed?: string;
 }
 
@@ -55,8 +56,22 @@ export class SequentialChunkEngine {
     };
   }
 
-  public getAllJobs(): SequentialStreamJob[] {
-    return Array.from(this.jobs.values()).sort((a, b) => b.startedAt - a.startedAt);
+  public getAllJobs(folderId?: string, accountEmail?: string): SequentialStreamJob[] {
+    const all = Array.from(this.jobs.values()).sort((a, b) => b.startedAt - a.startedAt);
+    return all.filter((j) => {
+      if (folderId && folderId.trim() !== "" && j.folderId && j.folderId !== folderId) {
+        return false;
+      }
+      if (
+        accountEmail &&
+        accountEmail.trim() !== "" &&
+        j.accountEmail &&
+        j.accountEmail.toLowerCase() !== accountEmail.toLowerCase()
+      ) {
+        return false;
+      }
+      return true;
+    });
   }
 
   public getJob(id: string): SequentialStreamJob | undefined {
@@ -318,6 +333,7 @@ export class SequentialChunkEngine {
       destination = "drive",
       accessToken,
       folderId,
+      accountEmail,
     } = opts;
 
     if (!url || typeof url !== "string") {
@@ -374,6 +390,8 @@ export class SequentialChunkEngine {
       currentChunkIndex: 0,
       totalChunks,
       pipelinePrefetch,
+      folderId,
+      accountEmail,
       destination,
       logs: [
         `[${new Date().toLocaleTimeString()}] 🚀 Iniciando Motor de Streaming Secuencial por Chunks`,

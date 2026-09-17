@@ -229,6 +229,7 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
     try {
       const activeTokenStr = activeToken || "";
       const targetFolder = selectedFolderId || propFolderId || currentSession?.dedicatedFolderId || currentSession?.folder?.id || "root";
+      const activeAccountEmail = currentSession?.activeAccount?.email || currentSession?.user?.email || undefined;
 
       // If multi-file torrent and multiple files selected
       if (sourceInfo?.files && sourceInfo.files.length > 1 && selectedFilePaths.size > 0) {
@@ -238,6 +239,7 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
             sourceUrl: url.trim() || `torrent_file_${file.name}`,
             targetFilename: file.name,
             folderId: targetFolder,
+            accountEmail: activeAccountEmail,
             accessToken: activeTokenStr,
             chunkSizeMB: Number(chunkSizeMB) || 25,
             torrentBase64: torrentBase64 || undefined,
@@ -252,6 +254,7 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
           sourceUrl: url.trim(),
           targetFilename: customFilename.trim() || undefined,
           folderId: targetFolder,
+          accountEmail: activeAccountEmail,
           accessToken: activeTokenStr,
           chunkSizeMB: Number(chunkSizeMB) || 25,
           torrentBase64: torrentBase64 || undefined,

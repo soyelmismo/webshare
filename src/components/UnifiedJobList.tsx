@@ -140,6 +140,7 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
   const [isAccountDropdownOpen, setIsAccountDropdownOpen] = useState<boolean>(false);
 
   const activeToken = accessToken || driveSession?.token || null;
+  const activeAccountEmail = driveSession?.activeAccount?.email || driveSession?.user?.email || "";
   const activeFolderId = propFolderId || driveSession?.folder?.id || driveSession?.activeAccount?.folder?.id || "";
 
   // Poll tasks from backend APIs every 1.5 seconds
@@ -150,16 +151,17 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
         headers["Authorization"] = `Bearer ${activeToken}`;
       }
 
-      // 1. Fetch Stream Tasks (Zero-Disk direct streaming)
-      const streamUrl = `/api/stream/tasks?folderId=${encodeURIComponent(activeFolderId)}`;
+      // 1. Fetch Stream Tasks for active account
+      const streamUrl = `/api/stream/tasks?folderId=${encodeURIComponent(activeFolderId)}&accountEmail=${encodeURIComponent(activeAccountEmail)}`;
       const streamRes = await fetch(streamUrl, { headers }).catch(() => null);
       let streamTasks: StreamDriveTask[] = [];
       if (streamRes && streamRes.ok) {
         streamTasks = await streamRes.json().catch(() => []);
       }
 
-      // 2. Fetch Sequential Jobs (Multi-thread HTTP Range & drive upload)
-      const seqRes = await fetch("/api/sequential/jobs").catch(() => null);
+      // 2. Fetch Sequential Jobs for active account
+      const seqUrl = `/api/sequential/jobs?folderId=${encodeURIComponent(activeFolderId)}&accountEmail=${encodeURIComponent(activeAccountEmail)}`;
+      const seqRes = await fetch(seqUrl, { headers }).catch(() => null);
       let seqJobs: SequentialStreamJob[] = [];
       if (seqRes && seqRes.ok) {
         seqJobs = await seqRes.json().catch(() => []);
@@ -226,9 +228,13 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
 
       const jobsMap = new Map<string, UnifiedJobItem>();
 
-      // Populate from cache first (excluding deleted)
+      // Populate from cache first (excluding deleted and other accounts)
       for (const cj of cached) {
         if (!deletedIds.has(cj.id)) {
+          const cjEmail = cj.rawStreamTask?.accountEmail || cj.rawSequentialJob?.accountEmail;
+          const cjFolder = cj.rawStreamTask?.driveFolderId || cj.rawSequentialJob?.folderId;
+          if (activeAccountEmail && cjEmail && cjEmail.toLowerCase() !== activeAccountEmail.toLowerCase()) continue;
+          if (activeFolderId && cjFolder && cjFolder !== activeFolderId) continue;
           jobsMap.set(cj.id, cj);
         }
       }
@@ -514,6 +520,8 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
     setIsAccountDropdownOpen(false);
     const switched = setActiveAccount(accId);
     if (switched) {
+      setSelectedJobId(null);
+      setUnifiedJobs([]);
       setDriveSession(loadDriveSession());
       setRecoveryNotice({
         type: "success",

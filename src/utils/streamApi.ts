@@ -50,6 +50,7 @@ export async function startStreamToDrive(params: {
   sourceUrl: string;
   accessToken: string;
   folderId: string;
+  accountEmail?: string;
   customChunkSizeMB?: number;
   customFileName?: string;
   torrentBase64?: string;

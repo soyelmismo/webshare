@@ -240,6 +240,8 @@ export interface SequentialStreamJob {
   currentChunkIndex: number;
   totalChunks: number;
   pipelinePrefetch: boolean;
+  folderId?: string;
+  accountEmail?: string;
   destination: "drive" | "server" | "both";
   error?: string;
   logs: string[];
@@ -320,6 +322,7 @@ export interface TransferTask {
 
 export interface StreamDriveTask {
   id: string;
+  accountEmail?: string;
   fileName: string;
   sourceUrl: string;
   sourceType: "torrent" | "direct";
@@ -356,6 +359,7 @@ export interface StreamDriveTask {
 export interface StreamManifestData {
   version: number;
   taskId: string;
+  accountEmail?: string;
   fileName: string;
   sourceUrl: string;
   sourceType: "torrent" | "direct";

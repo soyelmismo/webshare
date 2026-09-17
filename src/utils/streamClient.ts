@@ -35,6 +35,7 @@ export async function startStreamJob(params: {
   sourceUrl: string;
   targetFilename?: string;
   folderId?: string;
+  accountEmail?: string;
   accessToken: string;
   chunkSizeMB?: number;
   torrentBase64?: string;
@@ -45,6 +46,7 @@ export async function startStreamJob(params: {
     sourceUrl: params.sourceUrl,
     accessToken: params.accessToken,
     folderId: params.folderId || "root",
+    accountEmail: params.accountEmail,
     customFileName: params.targetFilename,
     customChunkSizeMB: params.chunkSizeMB,
     torrentBase64: params.torrentBase64,

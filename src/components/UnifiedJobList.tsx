@@ -37,6 +37,7 @@ import {
   ChevronsDown,
   Sliders,
   ListOrdered,
+  RotateCcw,
 } from "lucide-react";
 import { SequentialStreamJob, StreamDriveTask } from "../types";
 import { StoredDriveSession, loadDriveSession, setActiveAccount, onDriveSessionChange } from "../utils/driveStorage";
@@ -680,6 +681,30 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
     }
   };
 
+  const handleRetryJob = async (job: UnifiedJobItem) => {
+    setActionJobId(job.id);
+    try {
+      if (job.engineType === "stream") {
+        await fetch("/api/stream/retry", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ taskId: job.id, accessToken: activeToken }),
+        });
+      } else {
+        await fetch(`/api/sequential/jobs/${job.id}/resume`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ accessToken: activeToken, folderId: activeFolderId }),
+        });
+      }
+      await fetchAllJobs();
+    } catch (e) {
+      console.error("Error retrying job:", e);
+    } finally {
+      setActionJobId(null);
+    }
+  };
+
   const removeJobFromCacheAndState = (jobId: string) => {
     addDeletedJobId(jobId);
     setUnifiedJobs((prev) => {
@@ -1008,6 +1033,36 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
     await fetchAllJobs();
   };
 
+  const handleRetryFailedPackage = async (packageJobs: UnifiedJobItem[]) => {
+    const failedJobs = packageJobs.filter((j) => j.status === "failed" || j.status === "error");
+    if (failedJobs.length === 0) return;
+
+    const streamJobs = failedJobs.filter((j) => j.engineType === "stream");
+    const sequentialJobs = failedJobs.filter((j) => j.engineType === "sequential");
+
+    const promises: Promise<any>[] = [];
+    if (streamJobs.length > 0) {
+      const batchId = streamJobs[0].rawStreamTask?.batchId;
+      promises.push(
+        fetch("/api/stream/retry-batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            batchId: batchId || undefined,
+            taskIds: streamJobs.map((j) => j.id),
+            accessToken: activeToken,
+          }),
+        })
+      );
+    }
+    for (const j of sequentialJobs) {
+      promises.push(fetch(`/api/sequential/jobs/${j.id}/resume`, { method: "POST" }));
+    }
+
+    await Promise.allSettled(promises);
+    await fetchAllJobs();
+  };
+
   const handleDeletePackage = async (packageJobs: UnifiedJobItem[], packageName: string) => {
     if (!window.confirm(`¿Estás seguro de cancelar y eliminar las ${packageJobs.length} tareas del paquete "${packageName}"?`)) {
       return;
@@ -1111,6 +1166,16 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
               job.status
             )}
           </span>
+          {job.rawStreamTask?.statusText && (
+            <div className="text-[9px] font-mono text-[#f59e0b] truncate max-w-[130px] mt-0.5" title={job.rawStreamTask.statusText}>
+              {job.rawStreamTask.statusText}
+            </div>
+          )}
+          {(job.status === "failed" || job.status === "error") && job.error && (
+            <div className="text-[9px] font-mono text-[#f87171] truncate max-w-[140px] mt-0.5" title={job.error}>
+              {job.error}
+            </div>
+          )}
         </td>
 
         {/* Progress */}
@@ -1200,10 +1265,22 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
             {job.status === "paused" && (
               <button
                 onClick={() => handleResumeJob(job)}
-                className="p-1 rounded text-[#34d399] hover:bg-[#064e3b]/30 transition-colors"
+                disabled={actionJobId === job.id}
+                className="p-1 rounded text-[#34d399] hover:bg-[#064e3b]/30 transition-colors cursor-pointer disabled:opacity-40"
                 title="Reanudar"
               >
                 <Play className="w-3.5 h-3.5 fill-current" />
+              </button>
+            )}
+
+            {(job.status === "failed" || job.status === "error") && (
+              <button
+                onClick={() => handleRetryJob(job)}
+                disabled={actionJobId === job.id}
+                className="p-1 rounded text-[#f87171] hover:text-[#fca5a5] hover:bg-[#7f1d1d]/40 transition-colors cursor-pointer disabled:opacity-40"
+                title="Reintentar archivo fallido"
+              >
+                <RotateCcw className={`w-3.5 h-3.5 ${actionJobId === job.id ? "animate-spin" : ""}`} />
               </button>
             )}
 
@@ -1676,6 +1753,17 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
                   </button>
                 )}
 
+                {(selectedJob.status === "failed" || selectedJob.status === "error") && (
+                  <button
+                    onClick={() => handleRetryJob(selectedJob)}
+                    disabled={actionJobId === selectedJob.id}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#7f1d1d]/30 text-[#f87171] hover:text-[#fca5a5] border border-[#ef4444]/40 hover:bg-[#7f1d1d]/60 font-semibold cursor-pointer text-xs transition-colors"
+                  >
+                    <RotateCcw className={`w-3.5 h-3.5 ${actionJobId === selectedJob.id ? "animate-spin" : ""}`} />
+                    <span>Reintentar Archivo</span>
+                  </button>
+                )}
+
                 {selectedJob.engineType === "stream" && selectedJob.status !== "completed" && (
                   <button
                     onClick={() => handleAuditStreamSession(selectedJob)}
@@ -1989,6 +2077,17 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
                                     <span>Reanudar</span>
                                   </button>
                                 ) : null}
+
+                                {pkg.failedCount > 0 && (
+                                  <button
+                                    onClick={() => handleRetryFailedPackage(pkg.jobs)}
+                                    className="flex items-center gap-1 px-2.5 py-1 rounded bg-[#7f1d1d]/30 text-[#f87171] hover:text-[#fca5a5] border border-[#ef4444]/40 hover:bg-[#7f1d1d]/60 text-[11px] font-semibold cursor-pointer transition-colors"
+                                    title="Reintentar todos los archivos fallidos de este lote"
+                                  >
+                                    <RotateCcw className="w-3 h-3" />
+                                    <span>Reintentar Fallidos ({pkg.failedCount})</span>
+                                  </button>
+                                )}
 
                                 <button
                                   onClick={() => handleDeletePackage(pkg.jobs, pkg.name)}

@@ -2164,6 +2164,29 @@ app.use(express.json({ limit: "50mb" }));
     }
   });
 
+  app.post("/api/stream/retry", async (req, res) => {
+    try {
+      const { taskId, accessToken } = req.body;
+      if (!taskId) return res.status(400).json({ error: "Falta 'taskId'" });
+      const success = await streamManager.retryTask(taskId, accessToken);
+      res.json({ success });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/stream/retry-batch", async (req, res) => {
+    try {
+      const { batchId, taskIds, accessToken } = req.body;
+      const target = batchId || taskIds;
+      if (!target) return res.status(400).json({ error: "Falta 'batchId' o 'taskIds'" });
+      const result = await streamManager.retryBatchTasks(target, accessToken);
+      res.json({ success: true, ...result });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   app.post("/api/stream/recover", async (req, res) => {
     try {
       const { accessToken, folderId, accountEmail } = req.body;

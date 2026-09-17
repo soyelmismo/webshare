@@ -233,6 +233,31 @@ export async function resumeBatchStreamTasks(params: {
   return Boolean(data.success);
 }
 
+export async function retryStreamTask(taskId: string, accessToken?: string): Promise<boolean> {
+  const res = await fetch("/api/stream/retry", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ taskId, accessToken }),
+  });
+  if (!res.ok) return false;
+  const data = await res.json();
+  return Boolean(data.success);
+}
+
+export async function retryBatchStreamTasks(params: {
+  batchId?: string;
+  taskIds?: string[];
+  accessToken?: string;
+}): Promise<{ success: boolean; retriedCount?: number }> {
+  const res = await fetch("/api/stream/retry-batch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) return { success: false, retriedCount: 0 };
+  return await res.json();
+}
+
 export interface RcloneRemoteSummary {
   remoteName: string;
   email: string;

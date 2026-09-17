@@ -1349,6 +1349,10 @@ export class StreamTransferManager {
         return 0;
       } else if (res.status === 200 || res.status === 201) {
         return fileSize;
+      } else if (res.status === 404 || res.status === 410) {
+        // Session expired or cancelled on Google Drive
+        console.warn(`[StreamManager] Sesión resumable de Google Drive expirada/inválida (HTTP ${res.status}).`);
+        return -1;
       }
     } catch (e) {
       console.warn("Error al consultar bytes confirmados en Drive:", e);
@@ -1919,7 +1923,15 @@ export class StreamTransferManager {
       if (((task as any).needsCommittedSync || task.uploadedBytes === 0) && task.resumableUploadUrl) {
         (task as any).needsCommittedSync = false;
         const committed = await this.queryDriveSessionCommittedBytes(task.resumableUploadUrl, task.fileSize);
-        if (committed > task.uploadedBytes) {
+        if (committed === -1) {
+          task.resumableUploadUrl = "";
+          task.uploadedBytes = 0;
+          task.uploadedBytesFormatted = "0 B";
+          task.currentChunkIndex = 0;
+          task.progressPercent = 0;
+          this.saveTasksToDisk();
+          return false;
+        } else if (committed > task.uploadedBytes) {
           task.uploadedBytes = committed;
           task.uploadedBytesFormatted = formatBytes(committed);
           task.currentChunkIndex = Math.floor(committed / task.chunkSizeBytes);
@@ -2135,7 +2147,13 @@ export class StreamTransferManager {
           task.resumableUploadUrl,
           task.fileSize
         );
-        if (committed > task.uploadedBytes) {
+        if (committed === -1) {
+          task.resumableUploadUrl = "";
+          task.uploadedBytes = 0;
+          task.uploadedBytesFormatted = "0 B";
+          task.currentChunkIndex = 0;
+          task.progressPercent = 0;
+        } else if (committed > task.uploadedBytes) {
           task.uploadedBytes = committed;
           task.uploadedBytesFormatted = formatBytes(committed);
           task.currentChunkIndex = Math.floor(committed / task.chunkSizeBytes);
@@ -2144,18 +2162,44 @@ export class StreamTransferManager {
         }
       }
 
+      const MAX_AUTO_RETRIES = 5;
+      let consecutiveErrors = 0;
+
       while (task.uploadedBytes < task.fileSize && task.status === "streaming") {
         if (abortController.signal.aborted) break;
         const success = await this.processNextChunk(taskId, accessToken);
-        if (!success) {
+        if (success) {
+          consecutiveErrors = 0;
+          task.retries = 0;
+          if (task.statusText?.includes("Reintentando")) {
+            task.statusText = undefined;
+          }
+        } else {
           if (task.status !== "streaming") break;
-          await new Promise((r) => setTimeout(r, 1000));
+          consecutiveErrors++;
+          task.retries = consecutiveErrors;
+
+          if (consecutiveErrors >= MAX_AUTO_RETRIES) {
+            console.warn(`[StreamManager] Tarea ${task.fileName} falló tras ${consecutiveErrors} reintentos consecutivos. Marcando como error para dar paso a la cola.`);
+            task.status = "error";
+            task.statusText = `Fallo tras ${consecutiveErrors} reintentos`;
+            task.error = task.error || `Error en transmisión tras ${consecutiveErrors} reintentos`;
+            this.saveTasksToDisk();
+            break;
+          }
+
+          const backoffMs = Math.min(30000, 1000 * Math.pow(2, consecutiveErrors - 1));
+          task.statusText = `Reintento automático (${consecutiveErrors}/${MAX_AUTO_RETRIES}) en ${Math.round(backoffMs / 1000)}s...`;
+          console.log(`[StreamManager] ${task.fileName}: Reintento automático (${consecutiveErrors}/${MAX_AUTO_RETRIES}) en ${backoffMs}ms tras error: ${task.error}`);
+          this.saveTasksToDisk();
+          await new Promise((r) => setTimeout(r, backoffMs));
         }
       }
     } catch (err: any) {
       if (!abortController.signal.aborted && task.status === "streaming") {
         task.status = "error";
         task.error = err?.message || "Error en transmisión de chunks";
+        task.statusText = "Error en transmisión";
         this.saveTasksToDisk();
       }
     } finally {
@@ -2405,13 +2449,13 @@ export class StreamTransferManager {
 
     const collectedChunks: Buffer[] = [];
     let currentByteOffset = start;
-    let attempts = 0;
+    let idleAttempts = 0;
+    const MAX_IDLE_ATTEMPTS = 40; // 40 * 500ms = 20s of total silence before failing
 
-    while (currentByteOffset < clampedEnd && attempts < 10) {
+    while (currentByteOffset < clampedEnd && idleAttempts < MAX_IDLE_ATTEMPTS) {
       if (signal?.aborted) {
         throw new Error("Transmisión cancelada o pausada.");
       }
-      attempts++;
 
       const subBuf = await this.readTorrentStreamSegment(
         torrent,
@@ -2424,15 +2468,17 @@ export class StreamTransferManager {
       if (subBuf.length > 0) {
         collectedChunks.push(subBuf);
         currentByteOffset += subBuf.length;
+        idleAttempts = 0; // Reset idle counter because we are receiving real data!
       } else {
-        await new Promise((r) => setTimeout(r, 400));
+        idleAttempts++;
+        await new Promise((r) => setTimeout(r, 500));
       }
     }
 
     const finalBuf = Buffer.concat(collectedChunks);
     if (finalBuf.length < totalNeeded) {
       throw new Error(
-        `Segmento incompleto descargado del torrent (${finalBuf.length} B recibidos de ${totalNeeded} B esperados). Verifica que el torrent tenga peers activos.`
+        `Segmento incompleto descargado del torrent (${finalBuf.length} B recibidos de ${totalNeeded} B esperados tras ${idleAttempts} intentos). Verifica que el torrent tenga peers activos.`
       );
     }
     return finalBuf;
@@ -2750,22 +2796,37 @@ export class StreamTransferManager {
       this.abortControllers.delete(taskId);
     }
 
+    // Reset error state and retry counters
+    task.error = undefined;
+    task.statusText = undefined;
+    task.retries = 0;
+    (task as any).isProcessingChunk = false;
+    (task as any).needsCommittedSync = true;
+
     // Check confirmed bytes in Google Drive before resuming
     try {
-      const committed = await this.queryDriveSessionCommittedBytes(task.resumableUploadUrl, task.fileSize);
-      if (committed >= task.fileSize) {
-        task.uploadedBytes = task.fileSize;
-        task.uploadedBytesFormatted = formatBytes(task.fileSize);
-        task.currentChunkIndex = task.totalChunks;
-        task.progressPercent = 100;
-        task.status = "completed";
-        this.saveTasksToDisk();
-        return true;
-      } else if (committed > 0) {
-        task.uploadedBytes = committed;
-        task.uploadedBytesFormatted = formatBytes(committed);
-        task.currentChunkIndex = Math.floor(committed / task.chunkSizeBytes);
-        task.progressPercent = Math.min(99, Math.round((committed / task.fileSize) * 100));
+      if (task.resumableUploadUrl) {
+        const committed = await this.queryDriveSessionCommittedBytes(task.resumableUploadUrl, task.fileSize);
+        if (committed === -1) {
+          task.resumableUploadUrl = "";
+          task.uploadedBytes = 0;
+          task.uploadedBytesFormatted = "0 B";
+          task.currentChunkIndex = 0;
+          task.progressPercent = 0;
+        } else if (committed >= task.fileSize) {
+          task.uploadedBytes = task.fileSize;
+          task.uploadedBytesFormatted = formatBytes(task.fileSize);
+          task.currentChunkIndex = task.totalChunks;
+          task.progressPercent = 100;
+          task.status = "completed";
+          this.saveTasksToDisk();
+          return true;
+        } else if (committed > 0) {
+          task.uploadedBytes = committed;
+          task.uploadedBytesFormatted = formatBytes(committed);
+          task.currentChunkIndex = Math.floor(committed / task.chunkSizeBytes);
+          task.progressPercent = Math.min(99, Math.round((committed / task.fileSize) * 100));
+        }
       }
     } catch {}
 
@@ -2807,6 +2868,42 @@ export class StreamTransferManager {
     this.saveTasksToDisk();
     this.runStreamingLoop(taskId, accessToken);
     return true;
+  }
+
+  /**
+   * Explicitly retries a failed or stalled streaming task.
+   */
+  public async retryTask(taskId: string, accessToken?: string): Promise<boolean> {
+    const task = this.tasks.get(taskId);
+    if (!task) return false;
+
+    task.error = undefined;
+    task.statusText = undefined;
+    task.retries = 0;
+    (task as any).isProcessingChunk = false;
+    (task as any).needsCommittedSync = true;
+
+    // Check if Drive session is dead
+    if (task.resumableUploadUrl) {
+      try {
+        const committed = await this.queryDriveSessionCommittedBytes(task.resumableUploadUrl, task.fileSize);
+        if (committed === -1) {
+          task.resumableUploadUrl = "";
+          task.uploadedBytes = 0;
+          task.uploadedBytesFormatted = "0 B";
+          task.currentChunkIndex = 0;
+          task.progressPercent = 0;
+        }
+      } catch {}
+    }
+
+    const tokenToUse =
+      accessToken ||
+      (await this.getAccountTokenAsync(task.accountEmail)) ||
+      this.getAccountToken(task.accountEmail) ||
+      "";
+
+    return await this.resumeTask(taskId, tokenToUse);
   }
 
   /**
@@ -2928,12 +3025,63 @@ export class StreamTransferManager {
 
     for (const id of taskIds) {
       const task = this.tasks.get(id);
-      if (task && task.status === "paused") {
+      if (task && (task.status === "paused" || task.status === "error")) {
         task.status = "queued";
+        task.error = undefined;
+        task.statusText = undefined;
+        task.retries = 0;
+        (task as any).isProcessingChunk = false;
+        (task as any).needsCommittedSync = true;
       }
     }
     this.saveTasksToDisk();
     this.dispatchQueue();
+  }
+
+  /**
+   * Explicitly retries all failed or stalled tasks belonging to a batch or task ID list.
+   */
+  public async retryBatchTasks(
+    batchIdOrTaskIds: string | string[],
+    accessToken?: string
+  ): Promise<{ retriedCount: number }> {
+    if (accessToken) {
+      this.recordAccountToken(accessToken);
+    }
+    const taskIds = typeof batchIdOrTaskIds === "string"
+      ? Array.from(this.tasks.values()).filter((t) => t.batchId === batchIdOrTaskIds).map((t) => t.id)
+      : batchIdOrTaskIds;
+
+    let count = 0;
+    for (const id of taskIds) {
+      const task = this.tasks.get(id);
+      if (task && (task.status === "error" || task.status === "paused")) {
+        task.status = "queued";
+        task.error = undefined;
+        task.statusText = undefined;
+        task.retries = 0;
+        (task as any).isProcessingChunk = false;
+        (task as any).needsCommittedSync = true;
+
+        // Reset resumable session if dead
+        if (task.resumableUploadUrl) {
+          try {
+            const committed = await this.queryDriveSessionCommittedBytes(task.resumableUploadUrl, task.fileSize);
+            if (committed === -1) {
+              task.resumableUploadUrl = "";
+              task.uploadedBytes = 0;
+              task.uploadedBytesFormatted = "0 B";
+              task.currentChunkIndex = 0;
+              task.progressPercent = 0;
+            }
+          } catch {}
+        }
+        count++;
+      }
+    }
+    this.saveTasksToDisk();
+    this.dispatchQueue();
+    return { retriedCount: count };
   }
 
   /**

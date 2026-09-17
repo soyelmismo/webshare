@@ -1878,6 +1878,19 @@ app.use(express.json({ limit: "50mb" }));
         tasks = await streamManager.recoverFromDriveFolder(accessToken, folderId);
       }
 
+      // Serverless progress pump: if any task is streaming and hasn't progressed recently, process next chunk
+      if (accessToken && tasks.length > 0) {
+        for (const t of tasks) {
+          if (t.status === "streaming") {
+            const lastChunk = (t as any).lastChunkAt || t.startedAt || 0;
+            if (Date.now() - lastChunk >= 800) {
+              await streamManager.processNextChunk(t.id, accessToken).catch(() => {});
+            }
+          }
+        }
+        tasks = streamManager.getTasks();
+      }
+
       res.json(tasks);
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Error al listar tareas de streaming" });

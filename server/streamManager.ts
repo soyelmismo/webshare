@@ -635,8 +635,8 @@ export class StreamTransferManager {
     }
 
     const fileName = customFileName || inspected.fileName;
-    // Chunk size: multiple of 256KB (262,144 bytes). Default: 16MB.
-    const chunkMB = Math.max(4, Math.min(customChunkSizeMB || 64, 256));
+    // Chunk size: multiple of 256KB (262,144 bytes). Default: 16MB (fast for serverless & continuous servers).
+    const chunkMB = Math.max(4, Math.min(customChunkSizeMB || 16, 64));
     const chunkSizeBytes = Math.floor((chunkMB * 1024 * 1024) / 262144) * 262144;
 
     const taskId = `stream_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
@@ -712,6 +712,137 @@ export class StreamTransferManager {
   }
 
   /**
+   * Processes a single chunk for a task. Safe for both background loops and serverless polling triggers.
+   */
+  public async processNextChunk(taskId: string, accessToken: string): Promise<boolean> {
+    const task = this.tasks.get(taskId);
+    if (!task || task.status !== "streaming" || (task as any).isProcessingChunk) {
+      return false;
+    }
+
+    if (task.uploadedBytes >= task.fileSize) {
+      task.status = "completed";
+      task.progressPercent = 100;
+      task.speedMBs = 0;
+      task.completedAt = Date.now();
+      this.saveTasksToDisk();
+      return false;
+    }
+
+    (task as any).isProcessingChunk = true;
+    const now = Date.now();
+    try {
+      const start = task.uploadedBytes;
+      const end = Math.min(start + task.chunkSizeBytes, task.fileSize);
+      const chunkLen = end - start;
+
+      // 1. Fetch chunk slice from source
+      let buf = await this.fetchSourceChunkSlice({
+        taskId: task.id,
+        sourceUrl: task.sourceUrl,
+        sourceType: task.sourceType,
+        start,
+        end,
+        torrentBase64: task.torrentBase64,
+        webSeeds: task.webSeeds,
+        activeMirrorUrl: task.activeMirrorUrl,
+      });
+
+      if (buf.length !== chunkLen) {
+        if (end === task.fileSize && buf.length < chunkLen) {
+          const padded = Buffer.alloc(chunkLen);
+          buf.copy(padded);
+          buf = padded;
+        } else {
+          throw new Error(`Tamaño de chunk recibido (${buf.length} B) no coincide con el esperado (${chunkLen} B).`);
+        }
+      }
+
+      // 2. Upload to Google Drive via PUT
+      const putTimeout = AbortSignal.timeout(60000);
+      const driveRes = await fetchWithRetry(task.resumableUploadUrl, {
+        method: "PUT",
+        headers: {
+          "Content-Length": chunkLen.toString(),
+          "Content-Range": `bytes ${start}-${end - 1}/${task.fileSize}`,
+        },
+        body: buf,
+        signal: putTimeout,
+      });
+
+      if (driveRes.status === 308 || driveRes.status === 200 || driveRes.status === 201) {
+        const lastTime = (task as any).lastChunkAt || task.startedAt || now;
+        const timeDiffSec = Math.max(0.1, (now - lastTime) / 1000);
+        const speedMBs = Math.round((chunkLen / (1024 * 1024) / timeDiffSec) * 10) / 10;
+
+        task.uploadedBytes = end;
+        task.uploadedBytesFormatted = formatBytes(end);
+        task.currentChunkIndex = Math.floor(end / task.chunkSizeBytes);
+        task.progressPercent = Math.min(100, Math.round((end / task.fileSize) * 100));
+        task.speedMBs = speedMBs;
+        (task as any).lastChunkAt = now;
+
+        if (driveRes.status === 200 || driveRes.status === 201 || end >= task.fileSize) {
+          const resultData = driveRes.status !== 308 ? await driveRes.json().catch(() => ({})) : {};
+          task.status = "completed";
+          task.progressPercent = 100;
+          task.speedMBs = 0;
+          task.completedAt = Date.now();
+          if (resultData.id) task.finalDriveFileId = resultData.id;
+          if (resultData.md5Checksum) task.md5Checksum = resultData.md5Checksum;
+          if (resultData.webViewLink) task.webViewLink = resultData.webViewLink;
+        }
+
+        this.saveTasksToDisk();
+
+        // Update manifest on Drive
+        if (accessToken && task.manifestFileId && task.driveFolderId) {
+          this.saveManifestToDrive(
+            accessToken,
+            task.driveFolderId,
+            {
+              version: 1,
+              taskId: task.id,
+              fileName: task.fileName,
+              sourceUrl: task.sourceUrl,
+              sourceType: task.sourceType,
+              torrentBase64: task.torrentBase64,
+              webSeeds: task.webSeeds,
+              fileSize: task.fileSize,
+              chunkSizeBytes: task.chunkSizeBytes,
+              resumableUploadUrl: task.resumableUploadUrl,
+              driveFolderId: task.driveFolderId,
+              uploadedBytes: task.uploadedBytes,
+              currentChunkIndex: task.currentChunkIndex,
+              totalChunks: task.totalChunks,
+              status: task.status,
+              startedAt: task.startedAt,
+              updatedAt: now,
+              finalDriveFileId: task.finalDriveFileId,
+              md5Checksum: task.md5Checksum,
+            },
+            task.manifestFileId
+          ).catch(() => {});
+        }
+
+        return true;
+      } else if (driveRes.status >= 500) {
+        console.warn(`[StreamManager] Drive status ${driveRes.status} al subir chunk`);
+        return false;
+      } else {
+        const errText = await driveRes.text();
+        throw new Error(`Google Drive HTTP ${driveRes.status}: ${errText}`);
+      }
+    } catch (err: any) {
+      console.warn(`[StreamManager] Error procesando chunk para ${taskId}:`, err?.message);
+      task.error = err?.message;
+      return false;
+    } finally {
+      (task as any).isProcessingChunk = false;
+    }
+  }
+
+  /**
    * The core rolling-window streaming loop.
    */
   private async runStreamingLoop(taskId: string, accessToken: string): Promise<void> {
@@ -720,26 +851,6 @@ export class StreamTransferManager {
 
     const abortController = new AbortController();
     this.abortControllers.set(taskId, abortController);
-
-    let lastBytesSample = task.uploadedBytes;
-    let lastTimeSample = Date.now();
-
-    let statsTimer: NodeJS.Timeout | null = null;
-    if (task.sourceType === "torrent") {
-      statsTimer = setInterval(async () => {
-        try {
-          const client = await getWebTorrentClient();
-          if (client) {
-            const torrentId = task.torrentBase64 || task.sourceUrl;
-            const existing = client.get(torrentId);
-            if (existing) {
-              task.torrentSpeedMBs = Math.round((existing.downloadSpeed / (1024 * 1024)) * 10) / 10;
-              task.peers = existing.numPeers;
-            }
-          }
-        } catch {}
-      }, 1500);
-    }
 
     try {
       // Check current committed offset on Google Drive
@@ -754,297 +865,21 @@ export class StreamTransferManager {
         task.progressPercent = Math.min(100, Math.round((committed / task.fileSize) * 100));
       }
 
-      // Overlapped double-buffering pipeline state (zero-latency prefetching)
-      let prefetchedPromise: Promise<Buffer> | null = null;
-      let prefetchedRange: { start: number; end: number } | null = null;
-      let prefetchedError: any = null;
-
       while (task.uploadedBytes < task.fileSize && task.status === "streaming") {
-        if (abortController.signal.aborted) {
-          break;
-        }
-
-        const start = task.uploadedBytes;
-        const end = Math.min(start + task.chunkSizeBytes, task.fileSize);
-        const chunkLen = end - start;
-
-        // 1. Fetch chunk slice from source (Direct HTTP, WebSeed mirror, or Torrent)
-        let chunkBuffer: Buffer | null = null;
-        let sourceAttempts = 0;
-        const maxSourceAttempts = 5;
-        let lastSourceErr: any = null;
-
-        while (sourceAttempts < maxSourceAttempts) {
-          if (abortController.signal.aborted) break;
-          sourceAttempts++;
-          try {
-            let buf: Buffer;
-            if (
-              sourceAttempts === 1 &&
-              prefetchedPromise &&
-              prefetchedRange &&
-              prefetchedRange.start === start &&
-              prefetchedRange.end === end
-            ) {
-              if (prefetchedError) throw prefetchedError;
-              buf = await prefetchedPromise;
-            } else {
-              buf = await this.fetchSourceChunkSlice({
-                taskId: task.id,
-                sourceUrl: task.sourceUrl,
-                sourceType: task.sourceType,
-                start,
-                end,
-                signal: abortController.signal,
-                torrentBase64: task.torrentBase64,
-                webSeeds: task.webSeeds,
-                activeMirrorUrl: task.activeMirrorUrl,
-              });
-            }
-
-            if (buf.length !== chunkLen) {
-              if (end === task.fileSize && buf.length < chunkLen) {
-                console.warn(`[StreamManager] Rellenando con ceros el chunk final. Recibido ${buf.length} de ${chunkLen} B.`);
-                const padded = Buffer.alloc(chunkLen);
-                buf.copy(padded);
-                buf = padded;
-              } else {
-                throw new Error(`Tamaño de chunk recibido (${buf.length} B) no coincide con el esperado (${chunkLen} B).`);
-              }
-            }
-            chunkBuffer = buf;
-            break; // Exito
-          } catch (err: any) {
-            lastSourceErr = err;
-            console.warn(`[StreamManager] Reintento ${sourceAttempts}/${maxSourceAttempts} fallido al leer chunk de origen (${start}-${end}):`, err?.message);
-            if (sourceAttempts < maxSourceAttempts && !abortController.signal.aborted) {
-              await new Promise((res) => setTimeout(res, 2000 * sourceAttempts));
-            }
-          }
-        }
-
-        prefetchedPromise = null;
-        prefetchedRange = null;
-        prefetchedError = null;
-
-        if (!chunkBuffer || chunkBuffer.length !== chunkLen) {
-          throw new Error(
-            `Fallo al obtener el bloque de datos de origen tras ${maxSourceAttempts} intentos. Último error: ${lastSourceErr?.message}`
-          );
-        }
-
         if (abortController.signal.aborted) break;
-
-        // 2. ZERO-LATENCY PIPELINING: Concurrently prefetch the NEXT chunk slice [nextStart, nextEnd)
-        // while the current chunkBuffer is being transmitted to Google Drive over the network.
-        const nextStart = end;
-        const nextEnd = Math.min(nextStart + task.chunkSizeBytes, task.fileSize);
-        if (nextStart < task.fileSize && !abortController.signal.aborted) {
-          prefetchedRange = { start: nextStart, end: nextEnd };
-          prefetchedError = null;
-          prefetchedPromise = this.fetchSourceChunkSlice({
-            taskId: task.id,
-            sourceUrl: task.sourceUrl,
-            sourceType: task.sourceType,
-            start: nextStart,
-            end: nextEnd,
-            signal: abortController.signal,
-            torrentBase64: task.torrentBase64,
-            webSeeds: task.webSeeds,
-            activeMirrorUrl: task.activeMirrorUrl,
-          }).catch((err) => {
-            prefetchedError = err;
-            return Buffer.alloc(0);
-          });
-        } else {
-          prefetchedPromise = null;
-          prefetchedRange = null;
-          prefetchedError = null;
-        }
-
-        // 3. Stream chunk buffer directly to Google Drive via PUT (with automatic retry for transient hiccups)
-        let driveRes: Response | null = null;
-        let driveAttempts = 0;
-        const maxDriveAttempts = 4;
-
-        while (driveAttempts < maxDriveAttempts) {
-          if (abortController.signal.aborted) break;
-          driveAttempts++;
-          try {
-            const putTimeout = AbortSignal.timeout(90000);
-            const putSignal = AbortSignal.any([abortController.signal, putTimeout]);
-
-            driveRes = await fetchWithRetry(task.resumableUploadUrl, {
-              method: "PUT",
-              headers: {
-                "Content-Length": chunkLen.toString(),
-                "Content-Range": `bytes ${start}-${end - 1}/${task.fileSize}`,
-              },
-              body: chunkBuffer,
-              signal: putSignal,
-            });
-
-            if (driveRes.status === 308 || driveRes.status === 200 || driveRes.status === 201) {
-              break;
-            }
-
-            // Retry on transient Google 5xx errors
-            if (driveRes.status >= 500 && driveRes.status < 600) {
-              console.warn(
-                `Google Drive devolvió HTTP ${driveRes.status} en intento ${driveAttempts}, reintentando en ${driveAttempts * 2}s...`
-              );
-              await new Promise((r) => setTimeout(r, 2000 * driveAttempts));
-              continue;
-            }
-
-            const errBody = await driveRes.text();
-            throw new Error(`Google Drive devolvió HTTP ${driveRes.status}: ${errBody}`);
-          } catch (putErr: any) {
-            if (abortController.signal.aborted) throw putErr;
-            console.warn(
-              `Error en PUT a Drive (intento ${driveAttempts}/${maxDriveAttempts}):`,
-              putErr.message
-            );
-            if (driveAttempts >= maxDriveAttempts) throw putErr;
-            await new Promise((r) => setTimeout(r, 2000 * driveAttempts));
-          }
-        }
-
-        if (!driveRes) {
-          throw new Error("No se recibió respuesta de Google Drive tras reintentos.");
-        }
-
-        // 3. Verify response from Google Drive
-        if (driveRes.status === 308) {
-          // Chunk successfully committed to Google Drive
-          task.retries = 0; // Reset retries on success
-          task.uploadedBytes = end;
-          task.uploadedBytesFormatted = formatBytes(end);
-          task.currentChunkIndex = Math.floor(end / task.chunkSizeBytes);
-          task.progressPercent = Math.min(99, Math.round((end / task.fileSize) * 100));
-          task.lastChunkAt = Date.now();
-
-          // Speed calculation
-          const now = Date.now();
-          const elapsedSec = (now - lastTimeSample) / 1000;
-          if (elapsedSec >= 1.5) {
-            const bytesDelta = task.uploadedBytes - lastBytesSample;
-            task.speedMBs = Math.round((bytesDelta / (1024 * 1024 * elapsedSec)) * 10) / 10;
-            lastBytesSample = task.uploadedBytes;
-            lastTimeSample = now;
-          }
-
-          // Update Drive manifest every 2 chunks or every ~32MB
-          if (task.currentChunkIndex % 2 === 0) {
-            this.saveTasksToDisk();
-            if (accessToken && task.manifestFileId) {
-              this.saveManifestToDrive(
-                accessToken,
-                task.driveFolderId,
-                {
-                  version: 1,
-                  taskId: task.id,
-                  fileName: task.fileName,
-                  sourceUrl: task.sourceUrl,
-                  sourceType: task.sourceType,
-                  torrentBase64: task.torrentBase64,
-                  webSeeds: task.webSeeds,
-                  fileSize: task.fileSize,
-                  chunkSizeBytes: task.chunkSizeBytes,
-                  resumableUploadUrl: task.resumableUploadUrl,
-                  driveFolderId: task.driveFolderId,
-                  uploadedBytes: task.uploadedBytes,
-                  currentChunkIndex: task.currentChunkIndex,
-                  totalChunks: task.totalChunks,
-                  status: "streaming",
-                  startedAt: task.startedAt,
-                  updatedAt: Date.now(),
-                },
-                task.manifestFileId
-              ).catch(() => {});
-            }
-          }
-        } else if (driveRes.status === 200 || driveRes.status === 201) {
-          // Final chunk uploaded!
-          const resultData = (await driveRes.json()) as any;
-          task.retries = 0;
-          task.uploadedBytes = task.fileSize;
-          task.uploadedBytesFormatted = formatBytes(task.fileSize);
-          task.currentChunkIndex = task.totalChunks;
-          task.progressPercent = 100;
-          task.status = "completed";
-          task.completedAt = Date.now();
-          task.finalDriveFileId = resultData.id;
-          task.md5Checksum = resultData.md5Checksum;
-          task.webViewLink = resultData.webViewLink;
-          this.saveTasksToDisk();
-
-          // Update final manifest
-          if (accessToken && task.manifestFileId) {
-            await this.saveManifestToDrive(
-              accessToken,
-              task.driveFolderId,
-              {
-                version: 1,
-                taskId: task.id,
-                fileName: task.fileName,
-                sourceUrl: task.sourceUrl,
-                sourceType: task.sourceType,
-                torrentBase64: task.torrentBase64,
-                webSeeds: task.webSeeds,
-                fileSize: task.fileSize,
-                chunkSizeBytes: task.chunkSizeBytes,
-                resumableUploadUrl: task.resumableUploadUrl,
-                driveFolderId: task.driveFolderId,
-                uploadedBytes: task.fileSize,
-                currentChunkIndex: task.totalChunks,
-                totalChunks: task.totalChunks,
-                status: "completed",
-                startedAt: task.startedAt,
-                updatedAt: Date.now(),
-                finalDriveFileId: resultData.id,
-                md5Checksum: resultData.md5Checksum,
-              },
-              task.manifestFileId
-            );
-          }
-          break;
-        } else {
-          const errBody = await driveRes.text();
-          throw new Error(`Google Drive devolvió HTTP ${driveRes.status}: ${errBody}`);
+        const success = await this.processNextChunk(taskId, accessToken);
+        if (!success) {
+          if (task.status !== "streaming") break;
+          await new Promise((r) => setTimeout(r, 1000));
         }
       }
     } catch (err: any) {
-      if (abortController.signal.aborted) {
-        // Paused or cancelled intentionally
-        return;
-      }
-      console.error("Error en streaming loop a Drive:", err);
-      
-      const maxRetries = 10;
-      task.retries = (task.retries || 0) + 1;
-      
-      if (task.retries <= maxRetries) {
-        const backoffDelay = Math.min(1000 * Math.pow(2, task.retries), 60000); // Max 60s
-        console.log(`[StreamManager] Tarea ${taskId} falló. Reintento automático ${task.retries}/${maxRetries} en ${backoffDelay}ms...`);
-        
-        task.status = "error"; // Keep UI informed of temporary error state
-        task.error = `Auto-reintento en ${Math.round(backoffDelay/1000)}s... (${task.retries}/${maxRetries}): ${err.message}`;
-        this.saveTasksToDisk();
-        
-        setTimeout(() => {
-          if (this.tasks.has(taskId) && (task.status === "error" || task.status === "paused")) {
-            this.resumeTask(taskId, accessToken || "").catch(e => {
-              console.error(`Fallo crítico al auto-reanudar ${taskId}:`, e);
-            });
-          }
-        }, backoffDelay);
-      } else {
+      if (!abortController.signal.aborted && task.status === "streaming") {
         task.status = "error";
-        task.error = `Límite de reintentos alcanzado (${maxRetries}). Último error: ${err.message || "Fallo durante la transmisión de chunks"}`;
+        task.error = err?.message || "Error en transmisión de chunks";
+        this.saveTasksToDisk();
       }
     } finally {
-      if (statsTimer) clearInterval(statsTimer);
       this.abortControllers.delete(taskId);
       this.saveTasksToDisk();
     }

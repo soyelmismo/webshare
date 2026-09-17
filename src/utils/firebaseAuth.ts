@@ -56,7 +56,7 @@ let isSigningIn = false;
 
 // Initialize cached access token from persistent client-side cookies & localStorage
 const initialSession = loadDriveSession();
-let cachedAccessToken: string | null = initialSession.token;
+let cachedAccessToken: string | null = initialSession.isExpired ? null : initialSession.token;
 
 /**
  * Creates a compatible Firebase User object from cached/cookie profile
@@ -87,21 +87,23 @@ export const initAuth = (
   onAuthSuccess?: (user: User, token: string) => void,
   onAuthFailure?: () => void
 ) => {
-  // 1. Immediately check if there is a permanent token in Cookies / LocalStorage
+  // 1. Immediately check if there is an active valid token in Cookies / LocalStorage
   const stored = loadDriveSession();
-  if (stored.token) {
+  if (stored?.token && !stored.isExpired) {
     cachedAccessToken = stored.token;
-    if (stored.user && onAuthSuccess) {
+    if (stored?.user && onAuthSuccess) {
       // Restore immediately so UI does not flicker or require re-login
       onAuthSuccess(createSyntheticUser(stored.user), stored.token);
     }
+  } else {
+    cachedAccessToken = null;
   }
 
   // 2. Listen to Firebase auth state changes
   return onAuthStateChanged(auth, async (user: User | null) => {
     if (!cachedAccessToken) {
       const currentStored = loadDriveSession();
-      if (currentStored.token) {
+      if (currentStored?.token && !currentStored.isExpired) {
         cachedAccessToken = currentStored.token;
       }
     }
@@ -123,7 +125,7 @@ export const initAuth = (
       // Even if Firebase auth is null (e.g. reload or custom token), if we have a valid stored token & user, keep it
       if (cachedAccessToken) {
         const currentStored = loadDriveSession();
-        if (currentStored.token && currentStored.user) {
+        if (currentStored?.token && currentStored?.user && !currentStored.isExpired) {
           if (onAuthSuccess) {
             onAuthSuccess(createSyntheticUser(currentStored.user), currentStored.token);
           }

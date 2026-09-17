@@ -2,23 +2,19 @@ import React from "react";
 import {
   LayoutDashboard,
   Cpu,
-  Layers,
-  Database,
-  Network,
-  Terminal,
-  Zap,
-  CloudDownload,
-  Columns2,
   CloudLightning,
-  Gauge,
+  Zap,
 } from "lucide-react";
 
 export type TabId =
   | "overview"
+  | "system"
+  | "drive"
+  | "performance"
+  // Legacy aliases for backward-compatible routing / direct links:
   | "commander"
   | "stream"
   | "speedtest"
-  | "drive"
   | "cpu"
   | "memory"
   | "storage"
@@ -26,8 +22,10 @@ export type TabId =
   | "runtime"
   | "benchmark";
 
+export type MainTabId = "overview" | "system" | "drive" | "performance";
+
 interface NavigationTabsProps {
-  activeTab: TabId;
+  activeTab: MainTabId | TabId;
   onChangeTab: (tab: TabId) => void;
 }
 
@@ -35,87 +33,70 @@ export const NavigationTabs: React.FC<NavigationTabsProps> = ({
   activeTab,
   onChangeTab,
 }) => {
-  const tabs: Array<{ id: TabId; label: string; icon: React.ReactNode }> = [
+  // Normalize legacy tab names into main category highlight if needed
+  const getNormalizedMainTab = (tab: string): MainTabId => {
+    if (tab === "overview") return "overview";
+    if (["system", "cpu", "memory", "storage", "network", "runtime"].includes(tab)) return "system";
+    if (["drive", "stream", "commander"].includes(tab)) return "drive";
+    if (["performance", "benchmark", "speedtest"].includes(tab)) return "performance";
+    return "overview";
+  };
+
+  const normalizedActive = getNormalizedMainTab(activeTab);
+
+  const mainTabs: Array<{ id: MainTabId; label: string; sub: string; icon: React.ReactNode }> = [
     {
       id: "overview",
-      label: "General",
-      icon: <LayoutDashboard className="w-3.5 h-3.5" />,
+      label: "Dashboard",
+      sub: "Resumen y Métricas",
+      icon: <LayoutDashboard className="w-4 h-4" />,
     },
     {
-      id: "stream",
-      label: "Streaming a Drive",
-      icon: <CloudLightning className="w-3.5 h-3.5 text-emerald-400" />,
-    },
-    {
-      id: "speedtest",
-      label: "Speed Test Crudo",
-      icon: <Gauge className="w-3.5 h-3.5 text-cyan-400" />,
-    },
-    {
-      id: "commander",
-      label: "File Commander",
-      icon: <Columns2 className="w-3.5 h-3.5" />,
+      id: "system",
+      label: "Hardware & Sistema",
+      sub: "CPU • RAM • Disco • Red • Runtime",
+      icon: <Cpu className="w-4 h-4" />,
     },
     {
       id: "drive",
-      label: "Google Drive",
-      icon: <CloudDownload className="w-3.5 h-3.5" />,
+      label: "Drive & Archivos",
+      sub: "Streaming • File Commander • Cloud",
+      icon: <CloudLightning className="w-4 h-4" />,
     },
     {
-      id: "cpu",
-      label: "CPU",
-      icon: <Cpu className="w-3.5 h-3.5" />,
-    },
-    {
-      id: "memory",
-      label: "Memoria",
-      icon: <Layers className="w-3.5 h-3.5" />,
-    },
-    {
-      id: "storage",
-      label: "Disco",
-      icon: <Database className="w-3.5 h-3.5" />,
-    },
-    {
-      id: "network",
-      label: "Red",
-      icon: <Network className="w-3.5 h-3.5" />,
-    },
-    {
-      id: "runtime",
-      label: "Runtime",
-      icon: <Terminal className="w-3.5 h-3.5" />,
-    },
-    {
-      id: "benchmark",
-      label: "Benchmark",
-      icon: <Zap className="w-3.5 h-3.5 text-amber-400" />,
+      id: "performance",
+      label: "Rendimiento & Tests",
+      sub: "Benchmark Host • Speed Test",
+      icon: <Zap className="w-4 h-4" />,
     },
   ];
 
   return (
-    <nav className="border-b border-slate-800/80 bg-slate-950/80 sticky top-[49px] z-30 backdrop-blur-sm overflow-x-auto scrollbar-none">
-      <div className="max-w-7xl mx-auto px-4 lg:px-8 flex items-center gap-1 min-w-max py-1.5">
-        {tabs.map((tab) => {
-          const isActive = activeTab === tab.id;
-          return (
-            <button
-              key={tab.id}
-              onClick={() => onChangeTab(tab.id)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer whitespace-nowrap ${
-                isActive
-                  ? "bg-slate-800 text-white font-semibold border border-slate-700 shadow-sm"
-                  : "text-slate-400 hover:text-slate-200 hover:bg-slate-900/60"
-              }`}
-            >
-              <span className={isActive ? "text-indigo-400" : "text-slate-500"}>
-                {tab.icon}
-              </span>
-              <span>{tab.label}</span>
-            </button>
-          );
-        })}
+    <nav className="border-b border-[#22272e] bg-[#101317]/80 backdrop-blur sticky top-[53px] z-30">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="flex items-center gap-1 sm:gap-2 py-1.5 overflow-x-auto scrollbar-none">
+          {mainTabs.map((tab) => {
+            const isActive = normalizedActive === tab.id;
+            return (
+              <button
+                key={tab.id}
+                onClick={() => onChangeTab(tab.id)}
+                className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs transition-all cursor-pointer whitespace-nowrap ${
+                  isActive
+                    ? "bg-[#1c2128] text-[#f3f4f6] font-semibold border border-[#3b424d] shadow-sm"
+                    : "text-[#9ca3af] hover:text-[#f3f4f6] hover:bg-[#161a1f] font-medium border border-transparent"
+                }`}
+              >
+                <span className={isActive ? "text-[#10b981]" : "text-[#6b7280]"}>
+                  {tab.icon}
+                </span>
+                <span className="font-semibold tracking-wide">{tab.label}</span>
+              </button>
+            );
+          })}
+        </div>
       </div>
     </nav>
   );
 };
+

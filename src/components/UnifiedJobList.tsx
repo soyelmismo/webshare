@@ -1,0 +1,1088 @@
+import React, { useState, useEffect, useCallback } from "react";
+import {
+  CloudLightning,
+  Zap,
+  RefreshCw,
+  Play,
+  Pause,
+  Square,
+  Trash2,
+  ExternalLink,
+  ShieldCheck,
+  AlertCircle,
+  CheckCircle2,
+  Loader2,
+  ChevronDown,
+  Search,
+  Filter,
+  Upload,
+  HardDrive,
+  UserPlus,
+  Check,
+  Activity,
+  FileCode,
+  Sparkles,
+  HelpCircle,
+  Clock,
+  ArrowUpRight,
+  Database,
+  CloudDownload,
+  Folder,
+} from "lucide-react";
+import { SequentialStreamJob, StreamDriveTask } from "../types";
+import { StoredDriveSession, loadDriveSession, setActiveAccount } from "../utils/driveStorage";
+import { googleSignIn } from "../utils/firebaseAuth";
+
+export interface UnifiedJobItem {
+  id: string;
+  filename: string;
+  sourceUrl: string;
+  engineType: "stream" | "sequential" | "proxy";
+  status: "starting" | "streaming" | "downloading" | "paused" | "completed" | "failed" | "error" | "cancelled";
+  progressPercent: number;
+  downloadSpeedStr: string;
+  uploadSpeedStr: string;
+  downloadedBytes: number;
+  totalBytes: number;
+  destination: "drive" | "server" | "both";
+  startedAt: number;
+  completedAt?: number;
+  error?: string;
+  webViewLink?: string;
+  filePath?: string;
+  savedToDrive?: boolean;
+  uploadStatus?: "idle" | "uploading" | "completed" | "error";
+  uploadProgress?: number;
+  rawStreamTask?: StreamDriveTask;
+  rawSequentialJob?: SequentialStreamJob;
+}
+
+interface UnifiedJobListProps {
+  session?: StoredDriveSession;
+  accessToken?: string | null;
+  folderId?: string;
+  folderName?: string;
+  onOpenConnectModal?: () => void;
+  onRefreshFiles?: () => void;
+  onJobSelect?: (job: UnifiedJobItem) => void;
+}
+
+export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
+  session: propSession,
+  accessToken,
+  folderId: propFolderId,
+  folderName: _folderName = "Descargas Servidor",
+  onOpenConnectModal,
+  onRefreshFiles,
+  onJobSelect,
+}) => {
+  const [driveSession, setDriveSession] = useState<StoredDriveSession>(() => propSession || loadDriveSession());
+  const [unifiedJobs, setUnifiedJobs] = useState<UnifiedJobItem[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [filterType, setFilterType] = useState<"all" | "active" | "stream" | "sequential" | "completed">("all");
+  const [searchQuery, setSearchQuery] = useState<string>("");
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+
+  // Recovery state
+  const [isRecovering, setIsRecovering] = useState<boolean>(false);
+  const [recoveryNotice, setRecoveryNotice] = useState<{ type: "success" | "error" | "info"; message: string } | null>(null);
+
+  // Audit modal state
+  const [auditingJob, setAuditingJob] = useState<UnifiedJobItem | null>(null);
+  const [auditResult, setAuditResult] = useState<any | null>(null);
+  const [isAuditing, setIsAuditing] = useState<boolean>(false);
+
+  // Action loading states
+  const [actionJobId, setActionJobId] = useState<string | null>(null);
+
+  // Account dropdown state
+  const [isAccountDropdownOpen, setIsAccountDropdownOpen] = useState<boolean>(false);
+
+  const activeToken = accessToken || driveSession?.token || null;
+  const activeFolderId = propFolderId || driveSession?.folder?.id || driveSession?.activeAccount?.folder?.id || "";
+
+  // Poll tasks from backend APIs every 1.5 seconds
+  const fetchAllJobs = useCallback(async () => {
+    try {
+      // 1. Fetch Stream Tasks (Zero-Disk direct streaming)
+      const streamRes = await fetch("/api/stream/tasks").catch(() => null);
+      let streamTasks: StreamDriveTask[] = [];
+      if (streamRes && streamRes.ok) {
+        streamTasks = await streamRes.json().catch(() => []);
+      }
+
+      // 2. Fetch Sequential Jobs (Multi-thread HTTP Range & drive upload)
+      const seqRes = await fetch("/api/sequential/jobs").catch(() => null);
+      let seqJobs: SequentialStreamJob[] = [];
+      if (seqRes && seqRes.ok) {
+        seqJobs = await seqRes.json().catch(() => []);
+      }
+
+      // 3. Normalize Stream Tasks
+      const normalizedStream: UnifiedJobItem[] = (Array.isArray(streamTasks) ? streamTasks : []).map((st) => ({
+        id: st.id,
+        filename: st.fileName || "Sin nombre",
+        sourceUrl: st.sourceUrl || "",
+        engineType: "stream",
+        status:
+          st.status === "streaming"
+            ? "streaming"
+            : st.status === "completed"
+            ? "completed"
+            : st.status === "paused"
+            ? "paused"
+            : st.status === "error"
+            ? "failed"
+            : "starting",
+        progressPercent: Math.round(st.progressPercent || 0),
+        downloadSpeedStr: st.speedMBs ? `${st.speedMBs.toFixed(1)} MB/s` : "0 MB/s",
+        uploadSpeedStr: st.speedMBs ? `${st.speedMBs.toFixed(1)} MB/s` : "0 MB/s",
+        downloadedBytes: st.uploadedBytes || 0,
+        totalBytes: st.fileSize || 0,
+        destination: "drive",
+        startedAt: st.startedAt || Date.now(),
+        completedAt: st.completedAt,
+        error: st.error,
+        webViewLink: st.webViewLink,
+        savedToDrive: st.status === "completed",
+        rawStreamTask: st,
+      }));
+
+      // 4. Normalize Sequential Jobs
+      const normalizedSeq: UnifiedJobItem[] = (Array.isArray(seqJobs) ? seqJobs : []).map((sj) => ({
+        id: sj.id,
+        filename: sj.customName || sj.fileName || "Sin nombre",
+        sourceUrl: sj.url || "",
+        engineType: "sequential",
+        status: sj.status === "cancelled" ? "cancelled" : sj.status,
+        progressPercent: Math.round(sj.progress || 0),
+        downloadSpeedStr: sj.speed || sj.downloadSpeed || "0 MB/s",
+        uploadSpeedStr: sj.uploadSpeed || (sj.uploadProgress ? `${sj.uploadProgress}%` : "0 MB/s"),
+        downloadedBytes: sj.downloadedBytes || 0,
+        totalBytes: sj.totalBytes || sj.fileSize || 0,
+        destination: sj.destination || "drive",
+        startedAt: sj.startedAt || Date.now(),
+        completedAt: sj.completedAt,
+        error: sj.error,
+        webViewLink: sj.driveFile?.webViewLink,
+        filePath: sj.filePath,
+        savedToDrive: sj.savedToDrive || sj.uploadStatus === "completed",
+        uploadStatus: sj.uploadStatus,
+        uploadProgress: sj.uploadProgress,
+        rawSequentialJob: sj,
+      }));
+
+      // 5. Combine and sort by startedAt descending
+      const combined = [...normalizedStream, ...normalizedSeq].sort((a, b) => b.startedAt - a.startedAt);
+      setUnifiedJobs(combined);
+
+      if (!selectedJobId && combined.length > 0) {
+        setSelectedJobId(combined[0].id);
+      }
+    } catch (e) {
+      console.warn("Error fetching unified jobs:", e);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [selectedJobId]);
+
+  useEffect(() => {
+    fetchAllJobs();
+    const timer = setInterval(fetchAllJobs, 1500);
+    return () => clearInterval(timer);
+  }, [fetchAllJobs]);
+
+  // Keep local drive session updated
+  useEffect(() => {
+    const session = propSession || loadDriveSession();
+    setDriveSession(session);
+  }, [propSession]);
+
+  // Handle Recover Jobs from Google Drive
+  const handleRecoverJobsFromDrive = async () => {
+    if (!activeToken) {
+      setRecoveryNotice({
+        type: "error",
+        message: "Conecta una cuenta de Google Drive para buscar y recuperar tareas en la nube.",
+      });
+      return;
+    }
+
+    setIsRecovering(true);
+    setRecoveryNotice(null);
+
+    try {
+      const res = await fetch("/api/stream/recover", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          accessToken: activeToken,
+          folderId: activeFolderId,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Fallo al consultar Google Drive.");
+      }
+
+      const recoveredStream = data.recoveredCount || 0;
+      const resumedSeq = data.resumedSequentialCount || 0;
+      const totalRecovered = recoveredStream + resumedSeq;
+
+      if (totalRecovered > 0) {
+        setRecoveryNotice({
+          type: "success",
+          message: `¡Recuperación completada! Se restauraron ${recoveredStream} tareas de streaming directo y ${resumedSeq} descargas secuenciales desde los manifiestos en Google Drive.`,
+        });
+      } else {
+        setRecoveryNotice({
+          type: "info",
+          message: "No se encontraron manifiestos de tareas pendientes o interrumpidas en tu carpeta de Google Drive.",
+        });
+      }
+
+      await fetchAllJobs();
+      if (onRefreshFiles) onRefreshFiles();
+    } catch (err: any) {
+      setRecoveryNotice({
+        type: "error",
+        message: err.message || "Error al intentar recuperar tareas desde Google Drive.",
+      });
+    } finally {
+      setIsRecovering(false);
+    }
+  };
+
+  // Job Action Handlers
+  const handlePauseJob = async (job: UnifiedJobItem) => {
+    setActionJobId(job.id);
+    try {
+      if (job.engineType === "stream") {
+        await fetch("/api/stream/pause", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ taskId: job.id, accessToken: activeToken }),
+        });
+      } else {
+        await fetch(`/api/sequential/jobs/${job.id}/pause`, { method: "POST" });
+      }
+      await fetchAllJobs();
+    } catch (e) {
+      console.error("Error pausing job:", e);
+    } finally {
+      setActionJobId(null);
+    }
+  };
+
+  const handleResumeJob = async (job: UnifiedJobItem) => {
+    setActionJobId(job.id);
+    try {
+      if (job.engineType === "stream") {
+        await fetch("/api/stream/resume", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ taskId: job.id, accessToken: activeToken }),
+        });
+      } else {
+        await fetch(`/api/sequential/jobs/${job.id}/resume`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ accessToken: activeToken, folderId: activeFolderId }),
+        });
+      }
+      await fetchAllJobs();
+    } catch (e) {
+      console.error("Error resuming job:", e);
+    } finally {
+      setActionJobId(null);
+    }
+  };
+
+  const handleCancelJob = async (job: UnifiedJobItem) => {
+    setActionJobId(job.id);
+    try {
+      if (job.engineType === "stream") {
+        await fetch("/api/stream/cancel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ taskId: job.id, accessToken: activeToken }),
+        });
+      } else {
+        await fetch(`/api/sequential/jobs/${job.id}/cancel`, { method: "POST" });
+      }
+      await fetchAllJobs();
+    } catch (e) {
+      console.error("Error canceling job:", e);
+    } finally {
+      setActionJobId(null);
+    }
+  };
+
+  const handleDeleteJob = async (job: UnifiedJobItem) => {
+    setActionJobId(job.id);
+    try {
+      if (job.engineType === "sequential") {
+        await fetch(`/api/sequential/jobs/${job.id}`, { method: "DELETE" });
+      } else {
+        await fetch("/api/stream/cancel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ taskId: job.id, accessToken: activeToken }),
+        });
+      }
+      await fetchAllJobs();
+    } catch (e) {
+      console.error("Error deleting job:", e);
+    } finally {
+      setActionJobId(null);
+    }
+  };
+
+  const handleUploadToDrive = async (job: UnifiedJobItem) => {
+    if (!activeToken || !activeFolderId) {
+      setRecoveryNotice({
+        type: "error",
+        message: "Inicia sesión con Google Drive para subir este archivo local a tu nube.",
+      });
+      return;
+    }
+
+    setActionJobId(job.id);
+    try {
+      const res = await fetch(`/api/sequential/jobs/${job.id}/upload-to-drive`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accessToken: activeToken, folderId: activeFolderId }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Error al iniciar subida.");
+      setRecoveryNotice({
+        type: "success",
+        message: `Subida iniciada para "${job.filename}".`,
+      });
+      await fetchAllJobs();
+    } catch (err: any) {
+      setRecoveryNotice({ type: "error", message: err.message });
+    } finally {
+      setActionJobId(null);
+    }
+  };
+
+  const handleAuditStreamSession = async (job: UnifiedJobItem) => {
+    setAuditingJob(job);
+    setIsAuditing(true);
+    setAuditResult(null);
+
+    try {
+      const res = await fetch("/api/stream/audit-session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ taskId: job.id }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setAuditResult(data.audit);
+      } else {
+        setAuditResult({ error: data.error || "Error al auditar sesión" });
+      }
+    } catch (e: any) {
+      setAuditResult({ error: e.message });
+    } finally {
+      setIsAuditing(false);
+    }
+  };
+
+  // Switch Drive account inline
+  const handleSwitchDriveAccount = (accId: string) => {
+    setIsAccountDropdownOpen(false);
+    const switched = setActiveAccount(accId);
+    if (switched) {
+      setDriveSession(loadDriveSession());
+      setRecoveryNotice({
+        type: "success",
+        message: `Cuenta de Drive cambiada a: ${switched.email || switched.displayName}`,
+      });
+    }
+  };
+
+  const handleAddDriveAccount = async () => {
+    setIsAccountDropdownOpen(false);
+    try {
+      const res = await googleSignIn(true);
+      if (res) {
+        setDriveSession(loadDriveSession());
+        setRecoveryNotice({
+          type: "success",
+          message: `¡Cuenta agregada y activada: ${res.account.email || res.user.displayName}!`,
+        });
+      }
+    } catch (e: any) {
+      if (!e?.message?.includes("popup-closed")) {
+        setRecoveryNotice({ type: "error", message: e.message || "Error al agregar cuenta." });
+      }
+    }
+  };
+
+  // Filter jobs
+  const filteredJobs = unifiedJobs.filter((job) => {
+    // Filter by type/status
+    if (filterType === "active") {
+      if (job.status !== "streaming" && job.status !== "downloading" && job.status !== "starting") return false;
+    } else if (filterType === "stream") {
+      if (job.engineType !== "stream") return false;
+    } else if (filterType === "sequential") {
+      if (job.engineType !== "sequential") return false;
+    } else if (filterType === "completed") {
+      if (job.status !== "completed") return false;
+    }
+
+    // Filter by search query
+    if (searchQuery.trim()) {
+      const query = searchQuery.toLowerCase();
+      return job.filename.toLowerCase().includes(query) || job.sourceUrl.toLowerCase().includes(query);
+    }
+
+    return true;
+  });
+
+  const selectedJob = unifiedJobs.find((j) => j.id === selectedJobId) || filteredJobs[0];
+
+  // Helper stats
+  const activeCount = unifiedJobs.filter(
+    (j) => j.status === "streaming" || j.status === "downloading" || j.status === "starting"
+  ).length;
+  const completedCount = unifiedJobs.filter((j) => j.status === "completed").length;
+
+  return (
+    <div className="space-y-4">
+      {/* Top Bar: Controls, Drive Account Selector & Recover Button */}
+      <div className="bg-[#14171a] border border-[#22272e] rounded-xl p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 shadow-sm">
+        <div className="flex items-center gap-3">
+          <div className="p-2.5 rounded-lg bg-[#1f242c] border border-[#3b424d] text-[#10b981] shrink-0">
+            <Activity className="w-5 h-5 text-[#10b981]" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <h2 className="text-sm font-bold text-[#f3f4f6]">Listado Unificado de Jobs</h2>
+              <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-[#161a1f] text-[#10b981] border border-[#262b32]">
+                {activeCount} Activos / {unifiedJobs.length} Total
+              </span>
+            </div>
+            <p className="text-xs text-[#9ca3af]">
+              Gestiona todas tus transferencias (Streaming Zero-Disk y Descargas Secuenciales) en un solo panel centralizado.
+            </p>
+          </div>
+        </div>
+
+        {/* Action Controls */}
+        <div className="flex items-center gap-2 flex-wrap self-end md:self-auto">
+          {/* Button: Recover Jobs from Drive */}
+          <button
+            onClick={handleRecoverJobsFromDrive}
+            disabled={isRecovering || !activeToken}
+            title="Sincroniza y recupera trabajos guardados en los manifiestos de tu Google Drive"
+            className="flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-bold bg-[#1f242c] hover:bg-[#262b32] text-[#34d399] border border-[#059669]/60 hover:border-[#10b981] transition-all cursor-pointer disabled:opacity-50 shadow-sm"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 text-[#10b981] ${isRecovering ? "animate-spin" : ""}`} />
+            <span>{isRecovering ? "Buscando en Drive..." : "Recuperar Jobs de Drive"}</span>
+          </button>
+
+          {/* Drive Account Selector Dropdown */}
+          <div className="relative">
+            {activeToken ? (
+              <button
+                onClick={() => setIsAccountDropdownOpen(!isAccountDropdownOpen)}
+                className="flex items-center gap-2 bg-[#1a1e24] hover:bg-[#222831] border border-[#262b32] rounded-lg px-3 py-1.5 transition-colors cursor-pointer text-xs font-medium text-[#f3f4f6]"
+              >
+                <div className="w-2 h-2 rounded-full bg-[#10b981]" />
+                <span className="font-mono text-xs truncate max-w-[130px]">
+                  {driveSession.activeAccount?.email || driveSession.user?.email || "Google Drive"}
+                </span>
+                <ChevronDown className="w-3.5 h-3.5 text-[#9ca3af]" />
+              </button>
+            ) : (
+              <button
+                onClick={onOpenConnectModal || handleAddDriveAccount}
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-bold bg-[#10b981] hover:bg-[#059669] text-[#0b0d0e] transition-colors cursor-pointer shadow-sm"
+              >
+                <CloudDownload className="w-3.5 h-3.5" />
+                <span>Conectar Drive</span>
+              </button>
+            )}
+
+            {/* Account Selector Menu */}
+            {isAccountDropdownOpen && (
+              <div className="absolute right-0 mt-2 w-64 rounded-xl bg-[#14171a] border border-[#22272e] shadow-2xl z-50 overflow-hidden">
+                <div className="p-2.5 border-b border-[#22272e] bg-[#101317] flex items-center justify-between text-xs">
+                  <span className="font-semibold text-[#f3f4f6]">Seleccionar Cuenta Drive</span>
+                  <button
+                    onClick={handleAddDriveAccount}
+                    className="text-[11px] text-[#10b981] font-semibold hover:underline cursor-pointer"
+                  >
+                    + Agregar
+                  </button>
+                </div>
+
+                <div className="max-h-48 overflow-y-auto p-1 space-y-1">
+                  {driveSession.accounts.map((acc) => {
+                    const isActive =
+                      acc.id === driveSession.activeAccount?.id || acc.email === driveSession.user?.email;
+
+                    return (
+                      <div
+                        key={acc.id}
+                        onClick={() => handleSwitchDriveAccount(acc.id)}
+                        className={`p-2 rounded-lg flex items-center justify-between gap-2 text-xs transition-colors cursor-pointer ${
+                          isActive
+                            ? "bg-[#1a1e24] border border-[#10b981]/50 text-[#f3f4f6]"
+                            : "hover:bg-[#1a1e24] text-[#9ca3af]"
+                        }`}
+                      >
+                        <div className="min-w-0">
+                          <p className="font-semibold text-[#f3f4f6] truncate">{acc.displayName || "Usuario"}</p>
+                          <p className="text-[10px] text-[#6b7280] truncate font-mono">{acc.email}</p>
+                        </div>
+                        {isActive && <Check className="w-3.5 h-3.5 text-[#10b981] shrink-0" />}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="p-2 border-t border-[#22272e] bg-[#101317]">
+                  <button
+                    onClick={handleAddDriveAccount}
+                    className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md hover:bg-[#1a1e24] text-xs text-[#10b981] font-medium transition-colors cursor-pointer text-left"
+                  >
+                    <UserPlus className="w-3.5 h-3.5" />
+                    <span>Conectar otra cuenta de Google</span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Recovery / Action Notice Banner */}
+      {recoveryNotice && (
+        <div
+          className={`p-3.5 rounded-xl border text-xs flex items-center justify-between gap-2 shadow-sm ${
+            recoveryNotice.type === "success"
+              ? "bg-[#064e3b]/30 border-[#059669]/60 text-[#34d399]"
+              : recoveryNotice.type === "error"
+              ? "bg-[#7f1d1d]/30 border-[#ef4444]/40 text-[#f87171]"
+              : "bg-[#1f242c] border-[#3b424d] text-[#60a5fa]"
+          }`}
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            {recoveryNotice.type === "success" ? (
+              <CheckCircle2 className="w-4 h-4 text-[#10b981] shrink-0" />
+            ) : recoveryNotice.type === "error" ? (
+              <AlertCircle className="w-4 h-4 text-[#ef4444] shrink-0" />
+            ) : (
+              <Sparkles className="w-4 h-4 text-[#60a5fa] shrink-0" />
+            )}
+            <span className="truncate">{recoveryNotice.message}</span>
+          </div>
+          <button
+            onClick={() => setRecoveryNotice(null)}
+            className="text-xs font-bold px-1.5 py-0.5 hover:text-[#f3f4f6] cursor-pointer"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* Filters & Search Bar */}
+      <div className="bg-[#14171a] border border-[#22272e] rounded-xl p-3 flex flex-col sm:flex-row items-center justify-between gap-3">
+        {/* Sub-filter tabs */}
+        <div className="flex items-center gap-1 bg-[#101317] p-1 rounded-lg border border-[#22272e] w-full sm:w-auto">
+          <button
+            onClick={() => setFilterType("all")}
+            className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer ${
+              filterType === "all"
+                ? "bg-[#1f242c] text-[#f3f4f6] border border-[#3b424d]"
+                : "text-[#9ca3af] hover:text-[#f3f4f6]"
+            }`}
+          >
+            Todos ({unifiedJobs.length})
+          </button>
+          <button
+            onClick={() => setFilterType("active")}
+            className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer ${
+              filterType === "active"
+                ? "bg-[#1f242c] text-[#f3f4f6] border border-[#3b424d]"
+                : "text-[#9ca3af] hover:text-[#f3f4f6]"
+            }`}
+          >
+            En Curso ({activeCount})
+          </button>
+          <button
+            onClick={() => setFilterType("stream")}
+            className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1 ${
+              filterType === "stream"
+                ? "bg-[#1f242c] text-[#10b981] border border-[#3b424d]"
+                : "text-[#9ca3af] hover:text-[#f3f4f6]"
+            }`}
+          >
+            <CloudLightning className="w-3 h-3" />
+            Streaming
+          </button>
+          <button
+            onClick={() => setFilterType("sequential")}
+            className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1 ${
+              filterType === "sequential"
+                ? "bg-[#1f242c] text-[#3b82f6] border border-[#3b424d]"
+                : "text-[#9ca3af] hover:text-[#f3f4f6]"
+            }`}
+          >
+            <Zap className="w-3 h-3" />
+            Secuencial
+          </button>
+          <button
+            onClick={() => setFilterType("completed")}
+            className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer ${
+              filterType === "completed"
+                ? "bg-[#1f242c] text-[#34d399] border border-[#3b424d]"
+                : "text-[#9ca3af] hover:text-[#f3f4f6]"
+            }`}
+          >
+            Completados ({completedCount})
+          </button>
+        </div>
+
+        {/* Search input */}
+        <div className="relative w-full sm:w-64">
+          <Search className="w-3.5 h-3.5 text-[#9ca3af] absolute left-2.5 top-1/2 -translate-y-1/2" />
+          <input
+            type="text"
+            placeholder="Buscar por nombre o URL..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="w-full pl-8 pr-3 py-1.5 rounded-lg bg-[#101317] border border-[#22272e] text-xs font-mono text-[#f3f4f6] placeholder-[#6b7280] outline-none focus:border-[#10b981]"
+          />
+        </div>
+      </div>
+
+      {/* Main Container: Active Job Inspector (Top) + Unified Table (Bottom) */}
+      <div className="space-y-4">
+        {/* Selected / Active Job Detail View */}
+        {selectedJob && (
+          <div className="bg-[#14171a] border border-[#22272e] rounded-xl p-4 space-y-3 font-mono text-xs shadow-md">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-bold text-[#f3f4f6] text-sm truncate">
+                    {selectedJob.filename}
+                  </span>
+
+                  {/* Engine Badge */}
+                  {selectedJob.engineType === "stream" ? (
+                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-[#064e3b] text-[#34d399] border border-[#059669]/60 flex items-center gap-1">
+                      <CloudLightning className="w-3 h-3" />
+                      ⚡ Direct Streaming Zero-Disk
+                    </span>
+                  ) : (
+                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-[#1e3a8a]/40 text-[#60a5fa] border border-[#3b82f6]/40 flex items-center gap-1">
+                      <Zap className="w-3 h-3" />
+                      🚀 Sequential Chunk Engine
+                    </span>
+                  )}
+
+                  {/* Status Badge */}
+                  <span
+                    className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold ${
+                      selectedJob.status === "completed"
+                        ? "bg-[#064e3b] text-[#34d399] border border-[#059669]/60"
+                        : selectedJob.status === "streaming" || selectedJob.status === "downloading"
+                        ? "bg-[#1e3a8a]/40 text-[#60a5fa] border border-[#3b82f6]/40 animate-pulse"
+                        : selectedJob.status === "paused"
+                        ? "bg-[#78350f]/40 text-[#f59e0b] border border-[#f59e0b]/40"
+                        : selectedJob.status === "failed" || selectedJob.status === "error"
+                        ? "bg-[#7f1d1d]/40 text-[#f87171] border border-[#ef4444]/40"
+                        : "bg-[#1f242c] text-[#9ca3af] border border-[#3b424d]"
+                    }`}
+                  >
+                    {selectedJob.status}
+                  </span>
+                </div>
+
+                <p className="text-[11px] text-[#9ca3af] truncate mt-1">
+                  URL Origen: {selectedJob.sourceUrl}
+                </p>
+              </div>
+
+              {/* Individual Controls */}
+              <div className="flex items-center gap-2 shrink-0">
+                {(selectedJob.status === "streaming" || selectedJob.status === "downloading") && (
+                  <button
+                    onClick={() => handlePauseJob(selectedJob)}
+                    disabled={actionJobId === selectedJob.id}
+                    className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-[#78350f]/30 text-[#f59e0b] border border-[#f59e0b]/40 hover:bg-[#78350f]/60 font-semibold cursor-pointer text-xs"
+                  >
+                    <Pause className="w-3.5 h-3.5" />
+                    <span>Pausar</span>
+                  </button>
+                )}
+
+                {selectedJob.status === "paused" && (
+                  <button
+                    onClick={() => handleResumeJob(selectedJob)}
+                    disabled={actionJobId === selectedJob.id}
+                    className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-[#064e3b]/40 text-[#34d399] border border-[#059669]/60 hover:bg-[#064e3b]/70 font-semibold cursor-pointer text-xs"
+                  >
+                    <Play className="w-3.5 h-3.5 fill-current" />
+                    <span>Reanudar</span>
+                  </button>
+                )}
+
+                {selectedJob.engineType === "stream" && selectedJob.status !== "completed" && (
+                  <button
+                    onClick={() => handleAuditStreamSession(selectedJob)}
+                    className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-[#1f242c] text-[#f3f4f6] border border-[#3b424d] hover:bg-[#262b32] font-semibold cursor-pointer text-xs"
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5 text-[#10b981]" />
+                    <span>Auditar Sesión</span>
+                  </button>
+                )}
+
+                {selectedJob.engineType === "sequential" &&
+                  selectedJob.destination !== "drive" &&
+                  !selectedJob.savedToDrive &&
+                  selectedJob.filePath && (
+                    <button
+                      onClick={() => handleUploadToDrive(selectedJob)}
+                      disabled={actionJobId === selectedJob.id}
+                      className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-[#10b981] text-[#0b0d0e] font-bold hover:bg-[#059669] cursor-pointer text-xs"
+                    >
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>Subir a Drive</span>
+                    </button>
+                  )}
+
+                {selectedJob.webViewLink && (
+                  <a
+                    href={selectedJob.webViewLink}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-[#101317] text-[#10b981] border border-[#059669]/60 hover:bg-[#161a1f] font-semibold text-xs"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>Ver en Drive</span>
+                  </a>
+                )}
+
+                <button
+                  onClick={() => handleDeleteJob(selectedJob)}
+                  disabled={actionJobId === selectedJob.id}
+                  className="p-1.5 rounded-lg bg-[#7f1d1d]/20 text-[#f87171] border border-[#ef4444]/30 hover:bg-[#7f1d1d]/50 cursor-pointer"
+                  title="Eliminar de la lista"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Progress Bar */}
+            <div className="space-y-1">
+              <div className="w-full bg-[#101317] h-3 rounded-full overflow-hidden flex border border-[#22272e]">
+                <div
+                  style={{ width: `${Math.max(1, selectedJob.progressPercent || 0)}%` }}
+                  className={`h-full transition-all duration-300 ${
+                    selectedJob.status === "completed"
+                      ? "bg-[#10b981]"
+                      : selectedJob.status === "failed" || selectedJob.status === "error"
+                      ? "bg-[#ef4444]"
+                      : "bg-[#10b981]"
+                  }`}
+                />
+              </div>
+
+              <div className="flex justify-between items-center text-[11px] text-[#9ca3af]">
+                <span>
+                  Progreso: <strong className="text-[#34d399]">{selectedJob.progressPercent}%</strong>
+                </span>
+                <span>
+                  {(selectedJob.downloadedBytes / (1024 * 1024)).toFixed(1)} MB /{" "}
+                  {selectedJob.totalBytes > 0
+                    ? `${(selectedJob.totalBytes / (1024 * 1024)).toFixed(1)} MB`
+                    : "Desconocido"}
+                </span>
+              </div>
+            </div>
+
+            {/* Metrics Cards */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 font-sans">
+              <div className="p-2.5 bg-[#101317] rounded-lg border border-[#22272e]">
+                <span className="text-[10px] text-[#9ca3af] block">Velocidad Bajada</span>
+                <span className="text-sm font-bold font-mono text-[#f3f4f6]">
+                  {selectedJob.downloadSpeedStr}
+                </span>
+              </div>
+              <div className="p-2.5 bg-[#101317] rounded-lg border border-[#22272e]">
+                <span className="text-[10px] text-[#9ca3af] block">Subida a Google Drive</span>
+                <span className="text-sm font-bold font-mono text-[#f3f4f6]">
+                  {selectedJob.uploadSpeedStr}
+                </span>
+              </div>
+              <div className="p-2.5 bg-[#101317] rounded-lg border border-[#22272e]">
+                <span className="text-[10px] text-[#9ca3af] block">Destino Final</span>
+                <span className="text-xs font-bold font-mono text-[#10b981] capitalize">
+                  {selectedJob.destination === "drive"
+                    ? "📁 Google Drive"
+                    : selectedJob.destination === "server"
+                    ? "🖥️ Servidor Local"
+                    : "🔄 Drive & Servidor"}
+                </span>
+              </div>
+              <div className="p-2.5 bg-[#101317] rounded-lg border border-[#22272e]">
+                <span className="text-[10px] text-[#9ca3af] block">Inicio</span>
+                <span className="text-xs font-bold font-mono text-[#f3f4f6]">
+                  {new Date(selectedJob.startedAt).toLocaleTimeString()}
+                </span>
+              </div>
+            </div>
+
+            {selectedJob.error && (
+              <div className="p-2.5 rounded-lg bg-[#7f1d1d]/30 border border-[#ef4444]/40 text-[#f87171] text-xs">
+                <strong>Error:</strong> {selectedJob.error}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Unified Jobs Table */}
+        <div className="bg-[#14171a] border border-[#22272e] rounded-xl overflow-hidden shadow-sm">
+          {isLoading ? (
+            <div className="p-8 text-center text-xs text-[#9ca3af] flex items-center justify-center gap-2">
+              <Loader2 className="w-4 h-4 animate-spin text-[#10b981]" />
+              <span>Cargando listado unificado de trabajos...</span>
+            </div>
+          ) : filteredJobs.length === 0 ? (
+            <div className="p-8 text-center text-xs text-[#9ca3af] space-y-2">
+              <Database className="w-8 h-8 text-[#3b424d] mx-auto" />
+              <p className="font-semibold text-[#f3f4f6]">No hay trabajos registrados en la lista</p>
+              <p className="text-[11px] text-[#6b7280]">
+                Inicia una transferencia desde "Streaming Directo" o utiliza la opción "Recuperar Jobs de Drive".
+              </p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs font-mono">
+                <thead className="bg-[#1f242c] text-[#9ca3af] uppercase tracking-wider font-sans border-b border-[#22272e]">
+                  <tr>
+                    <th className="p-3 font-bold">Tipo / Motor</th>
+                    <th className="p-3 font-bold">Archivo</th>
+                    <th className="p-3 font-bold">Estado</th>
+                    <th className="p-3 font-bold">Progreso</th>
+                    <th className="p-3 font-bold">Velocidad</th>
+                    <th className="p-3 font-bold">Destino</th>
+                    <th className="p-3 font-bold text-right">Acciones</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#22272e] bg-[#101317]">
+                  {filteredJobs.map((job) => {
+                    const isSelected = selectedJob?.id === job.id;
+
+                    return (
+                      <tr
+                        key={job.id}
+                        onClick={() => {
+                          setSelectedJobId(job.id);
+                          if (onJobSelect) onJobSelect(job);
+                        }}
+                        className={`hover:bg-[#161a1f] cursor-pointer transition-colors ${
+                          isSelected ? "bg-[#1f242c]/90 font-semibold border-l-2 border-l-[#10b981]" : ""
+                        }`}
+                      >
+                        {/* Engine */}
+                        <td className="p-3">
+                          {job.engineType === "stream" ? (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-[#064e3b] text-[#34d399] border border-[#059669]/50 flex items-center gap-1 w-fit">
+                              <CloudLightning className="w-3 h-3 text-[#10b981]" />
+                              Stream Zero-Disk
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-[#1e3a8a]/30 text-[#60a5fa] border border-[#3b82f6]/40 flex items-center gap-1 w-fit">
+                              <Zap className="w-3 h-3 text-[#3b82f6]" />
+                              Secuencial
+                            </span>
+                          )}
+                        </td>
+
+                        {/* Filename */}
+                        <td className="p-3 text-[#f3f4f6] max-w-xs truncate" title={job.filename}>
+                          {job.filename}
+                        </td>
+
+                        {/* Status */}
+                        <td className="p-3">
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[10px] uppercase font-bold ${
+                              job.status === "completed"
+                                ? "text-[#34d399]"
+                                : job.status === "streaming" || job.status === "downloading"
+                                ? "text-[#60a5fa] animate-pulse"
+                                : job.status === "paused"
+                                ? "text-[#f59e0b]"
+                                : job.status === "failed" || job.status === "error"
+                                ? "text-[#f87171]"
+                                : "text-[#9ca3af]"
+                            }`}
+                          >
+                            {job.status}
+                          </span>
+                        </td>
+
+                        {/* Progress */}
+                        <td className="p-3 text-[#f3f4f6]">
+                          <div className="flex items-center gap-2">
+                            <div className="w-16 bg-[#14171a] h-2 rounded-full overflow-hidden border border-[#22272e]">
+                              <div
+                                style={{ width: `${job.progressPercent}%` }}
+                                className={`h-full ${
+                                  job.status === "completed"
+                                    ? "bg-[#10b981]"
+                                    : job.status === "failed"
+                                    ? "bg-[#ef4444]"
+                                    : "bg-[#10b981]"
+                                }`}
+                              />
+                            </div>
+                            <span className="text-[11px]">{job.progressPercent}%</span>
+                          </div>
+                        </td>
+
+                        {/* Speed */}
+                        <td className="p-3 text-[#9ca3af]">
+                          {job.downloadSpeedStr}
+                        </td>
+
+                        {/* Destination */}
+                        <td className="p-3 text-[#9ca3af]">
+                          {job.destination === "drive" ? "Drive 📁" : "Servidor 🖥️"}
+                        </td>
+
+                        {/* Actions */}
+                        <td className="p-3 text-right" onClick={(e) => e.stopPropagation()}>
+                          <div className="flex items-center justify-end gap-1">
+                            {(job.status === "streaming" || job.status === "downloading") && (
+                              <button
+                                onClick={() => handlePauseJob(job)}
+                                className="p-1 rounded text-[#f59e0b] hover:bg-[#78350f]/30 transition-colors"
+                                title="Pausar"
+                              >
+                                <Pause className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+
+                            {job.status === "paused" && (
+                              <button
+                                onClick={() => handleResumeJob(job)}
+                                className="p-1 rounded text-[#34d399] hover:bg-[#064e3b]/30 transition-colors"
+                                title="Reanudar"
+                              >
+                                <Play className="w-3.5 h-3.5 fill-current" />
+                              </button>
+                            )}
+
+                            {job.webViewLink && (
+                              <a
+                                href={job.webViewLink}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="p-1 rounded text-[#10b981] hover:bg-[#161a1f] transition-colors"
+                                title="Ver en Drive"
+                              >
+                                <ExternalLink className="w-3.5 h-3.5" />
+                              </a>
+                            )}
+
+                            <button
+                              onClick={() => handleDeleteJob(job)}
+                              className="p-1 rounded text-[#9ca3af] hover:text-[#f87171] hover:bg-[#7f1d1d]/30 transition-colors"
+                              title="Eliminar"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Audit Modal for Streaming Sessions */}
+      {auditingJob && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-[#14171a] border border-[#22272e] rounded-xl max-w-lg w-full p-4 space-y-3 font-mono text-xs">
+            <div className="flex items-center justify-between border-b border-[#22272e] pb-2">
+              <h3 className="font-bold text-[#f3f4f6] flex items-center gap-1.5 font-sans">
+                <ShieldCheck className="w-4 h-4 text-[#10b981]" />
+                Auditoría de Sesión con Google Drive
+              </h3>
+              <button
+                onClick={() => setAuditingJob(null)}
+                className="text-[#9ca3af] hover:text-[#f3f4f6] text-xs font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            {isAuditing ? (
+              <div className="py-8 text-center text-[#9ca3af] space-y-2">
+                <Loader2 className="w-6 h-6 animate-spin text-[#10b981] mx-auto" />
+                <p>Consultando servidores de Google Drive...</p>
+              </div>
+            ) : auditResult ? (
+              auditResult.error ? (
+                <div className="p-3 rounded-lg bg-[#7f1d1d]/30 border border-[#ef4444]/40 text-[#f87171]">
+                  <strong>Error:</strong> {auditResult.error}
+                </div>
+              ) : (
+                <div className="space-y-2 bg-[#101317] p-3 rounded-lg border border-[#22272e]">
+                  <div className="flex justify-between">
+                    <span className="text-[#9ca3af]">Estado HTTP:</span>
+                    <span className="text-[#34d399] font-bold">
+                      {auditResult.status} ({auditResult.statusText})
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-[#9ca3af]">Bytes Confirmados:</span>
+                    <span className="text-[#f3f4f6] font-bold">
+                      {auditResult.committedBytesFormatted} / {auditResult.totalBytesFormatted}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-[#9ca3af]">Sesión Activa en Google:</span>
+                    <span className={auditResult.sessionAlive ? "text-[#34d399]" : "text-[#f87171]"}>
+                      {auditResult.sessionAlive ? "Sí (Activa)" : "No (Expirada / Cerrada)"}
+                    </span>
+                  </div>
+                  <div className="p-2 rounded bg-[#14171a] text-[11px] text-[#9ca3af] mt-2">
+                    {auditResult.message}
+                  </div>
+                </div>
+              )
+            ) : null}
+
+            <div className="pt-2 flex justify-end">
+              <button
+                onClick={() => setAuditingJob(null)}
+                className="px-4 py-1.5 rounded-lg bg-[#1f242c] hover:bg-[#262b32] text-[#f3f4f6] text-xs font-semibold cursor-pointer border border-[#3b424d]"
+              >
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};

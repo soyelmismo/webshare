@@ -375,3 +375,6 @@ export async function createDriveFolder(
     webViewLink: data.webViewLink,
   };
 }
+
+export const listFilesInDedicatedFolder = listFilesInFolder;
+export const deleteDriveFile = deleteFileFromDrive;

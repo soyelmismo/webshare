@@ -6,7 +6,7 @@ import { getOrCreateDedicatedFolder, uploadBlobToDrive } from "../utils/googleDr
 
 interface ReportModalProps {
   serverSpecs: ServerSpecs;
-  benchmarkStats: ServerBenchmarkStats;
+  benchmarkStats?: ServerBenchmarkStats;
   onClose: () => void;
   onNavigateToDriveTab?: () => void;
 }
@@ -75,19 +75,19 @@ ${network.interfaces.map((i) => `  - ${i.name} (${i.family}): ${i.address} [${i.
 - **OpenSSL:** ${runtime.opensslVersion}
 - **PID Servidor:** ${runtime.pid} (PPID: ${runtime.ppid})
 - **Uptime Proceso Node:** ${runtime.processUptimeFormatted}
-- **Usuario de Ejecución:** ${os.user.username} (UID: ${os.user.uid})
+- **Usuario de Ejecución:** ${os?.user?.username || "root"} (UID: ${os?.user?.uid ?? 0})
 - **Directorio de Trabajo:** ${runtime.cwd}
 
 ---
 
 ## 6. Rendimiento & Benchmark de Servidor
-- **Puntuación Global:** ${benchmarkStats.overallScore ? `${benchmarkStats.overallScore} puntos` : "No ejecutado"}
-- **Nivel de Servidor:** ${benchmarkStats.tier || "N/A"}
-- **CPU Monohilo:** ${benchmarkStats.cpuSingleScore ? `${benchmarkStats.cpuSingleScore} pts (${benchmarkStats.cpuSingleOpsSec?.toLocaleString()} ops/s)` : "N/A"}
-- **CPU Multihilo:** ${benchmarkStats.cpuMultiScore ? `${benchmarkStats.cpuMultiScore} pts (${benchmarkStats.cpuMultiOpsSec?.toLocaleString()} ops/s)` : "N/A"}
-- **Ancho de Banda de Memoria:** ${benchmarkStats.memoryBandwidthMBps ? `${benchmarkStats.memoryBandwidthMBps} MB/s` : "N/A"}
-- **E/S Disco Raíz (Escritura):** ${benchmarkStats.diskWriteMBps ? `${benchmarkStats.diskWriteMBps} MB/s` : "N/A"}
-- **E/S Disco Raíz (Lectura):** ${benchmarkStats.diskReadMBps ? `${benchmarkStats.diskReadMBps} MB/s` : "N/A"}
+- **Puntuación Global:** ${benchmarkStats?.overallScore ? `${benchmarkStats.overallScore} puntos` : "No ejecutado"}
+- **Nivel de Servidor:** ${benchmarkStats?.tier || "N/A"}
+- **CPU Monohilo:** ${benchmarkStats?.cpuSingleScore ? `${benchmarkStats.cpuSingleScore} pts (${benchmarkStats.cpuSingleOpsSec?.toLocaleString()} ops/s)` : "N/A"}
+- **CPU Multihilo:** ${benchmarkStats?.cpuMultiScore ? `${benchmarkStats.cpuMultiScore} pts (${benchmarkStats.cpuMultiOpsSec?.toLocaleString()} ops/s)` : "N/A"}
+- **Ancho de Banda de Memoria:** ${benchmarkStats?.memoryBandwidthMBps ? `${benchmarkStats.memoryBandwidthMBps} MB/s` : "N/A"}
+- **E/S Disco Raíz (Escritura):** ${benchmarkStats?.diskWriteMBps ? `${benchmarkStats.diskWriteMBps} MB/s` : "N/A"}
+- **E/S Disco Raíz (Lectura):** ${benchmarkStats?.diskReadMBps ? `${benchmarkStats.diskReadMBps} MB/s` : "N/A"}
 
 *Generado automáticamente por el Monitor de Especificaciones del Servidor.*
 `;
@@ -156,29 +156,31 @@ ${network.interfaces.map((i) => `  - ${i.name} (${i.family}): ${i.address} [${i.
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in">
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-3xl max-h-[85vh] flex flex-col shadow-2xl overflow-hidden">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#000000]/75 backdrop-blur-sm animate-in fade-in duration-150">
+      <div className="bg-[#14171a] border border-[#22272e] rounded-xl w-full max-w-3xl max-h-[85vh] flex flex-col shadow-2xl overflow-hidden">
         {/* Modal Header */}
-        <div className="p-4 border-b border-slate-800 flex items-center justify-between">
+        <div className="p-4 border-b border-[#22272e] flex items-center justify-between bg-[#101317]">
           <div className="flex items-center gap-2">
-            <FileText className="w-5 h-5 text-indigo-400" />
-            <h3 className="text-base font-bold text-white">Informe Técnico del Servidor</h3>
+            <div className="p-1.5 rounded-lg bg-[#1f242c] text-[#10b981]">
+              <FileText className="w-4 h-4" />
+            </div>
+            <h3 className="text-sm font-bold text-[#f3f4f6]">Informe Técnico del Servidor</h3>
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-all cursor-pointer"
+            className="p-1.5 rounded-lg text-[#9ca3af] hover:text-[#f3f4f6] hover:bg-[#1f242c] transition-colors cursor-pointer"
           >
-            <X className="w-5 h-5" />
+            <X className="w-4 h-4" />
           </button>
         </div>
 
         {/* Format Selector and Action Bar */}
-        <div className="px-4 py-3 bg-slate-950/60 border-b border-slate-800/80 flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-1.5 p-1 bg-slate-800 rounded-lg text-xs font-semibold">
+        <div className="px-4 py-3 bg-[#0e1013] border-b border-[#22272e] flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-1 p-1 bg-[#14171a] border border-[#22272e] rounded-lg text-xs font-semibold">
             <button
               onClick={() => setFormat("markdown")}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-md transition-all cursor-pointer ${
-                format === "markdown" ? "bg-indigo-600 text-white shadow" : "text-slate-400 hover:text-white"
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-md transition-colors cursor-pointer ${
+                format === "markdown" ? "bg-[#1f242c] text-[#f3f4f6] border border-[#3b424d]" : "text-[#9ca3af] hover:text-[#f3f4f6]"
               }`}
             >
               <FileText className="w-3.5 h-3.5" />
@@ -186,28 +188,28 @@ ${network.interfaces.map((i) => `  - ${i.name} (${i.family}): ${i.address} [${i.
             </button>
             <button
               onClick={() => setFormat("json")}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-md transition-all cursor-pointer ${
-                format === "json" ? "bg-indigo-600 text-white shadow" : "text-slate-400 hover:text-white"
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-md transition-colors cursor-pointer ${
+                format === "json" ? "bg-[#1f242c] text-[#f3f4f6] border border-[#3b424d]" : "text-[#9ca3af] hover:text-[#f3f4f6]"
               }`}
             >
               <Code2 className="w-3.5 h-3.5" />
-              <span>JSON Raw (.json)</span>
+              <span>JSON (.json)</span>
             </button>
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
             <button
               onClick={handleCopy}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 transition-all cursor-pointer"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#1a1e24] hover:bg-[#222831] border border-[#262b32] text-[#f3f4f6] transition-colors cursor-pointer"
             >
               {copied ? (
                 <>
-                  <Check className="w-3.5 h-3.5 text-emerald-400" />
-                  <span className="text-emerald-400">¡Copiado!</span>
+                  <Check className="w-3.5 h-3.5 text-[#10b981]" />
+                  <span className="text-[#10b981]">¡Copiado!</span>
                 </>
               ) : (
                 <>
-                  <Copy className="w-3.5 h-3.5" />
+                  <Copy className="w-3.5 h-3.5 text-[#9ca3af]" />
                   <span>Copiar</span>
                 </>
               )}
@@ -216,17 +218,17 @@ ${network.interfaces.map((i) => `  - ${i.name} (${i.family}): ${i.address} [${i.
             <button
               onClick={handleSaveToDrive}
               disabled={isSavingToDrive}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-950/90 hover:bg-indigo-900 border border-indigo-500/40 text-indigo-300 transition-all cursor-pointer disabled:opacity-50"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#1a1e24] hover:bg-[#222831] border border-[#262b32] text-[#f3f4f6] transition-colors cursor-pointer disabled:opacity-50"
               title="Guardar archivo en la carpeta dedicada de Google Drive"
             >
               {isSavingToDrive ? (
                 <>
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-[#10b981]" />
                   <span>Guardando en Drive...</span>
                 </>
               ) : (
                 <>
-                  <CloudDownload className="w-3.5 h-3.5 text-indigo-400" />
+                  <CloudDownload className="w-3.5 h-3.5 text-[#10b981]" />
                   <span>{driveSaveStatus || "Guardar en Drive"}</span>
                 </>
               )}
@@ -234,7 +236,7 @@ ${network.interfaces.map((i) => `  - ${i.name} (${i.family}): ${i.address} [${i.
 
             <button
               onClick={handleDownload}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white transition-all cursor-pointer shadow-md"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#10b981] hover:bg-[#059669] text-[#0b0d0e] transition-colors cursor-pointer shadow-sm"
             >
               <Download className="w-3.5 h-3.5" />
               <span>Descarga Local</span>
@@ -243,16 +245,16 @@ ${network.interfaces.map((i) => `  - ${i.name} (${i.family}): ${i.address} [${i.
         </div>
 
         {/* Text Area Content */}
-        <div className="p-4 flex-1 overflow-y-auto bg-slate-950 font-mono text-xs text-slate-300">
+        <div className="p-4 flex-1 overflow-y-auto bg-[#0b0d0e] font-mono text-xs text-[#d1d5db] border-y border-[#22272e]">
           <pre className="whitespace-pre-wrap select-all font-mono leading-relaxed">{reportText}</pre>
         </div>
 
         {/* Modal Footer */}
-        <div className="p-3 border-t border-slate-800 bg-slate-900 flex justify-between items-center text-xs text-slate-500 font-mono">
-          <span>Servidor Host: {serverSpecs.os.hostname}</span>
+        <div className="p-3 bg-[#101317] flex justify-between items-center text-xs text-[#9ca3af] font-mono">
+          <span>Servidor: {serverSpecs.os.hostname}</span>
           <button
             onClick={onClose}
-            className="px-4 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold cursor-pointer"
+            className="px-4 py-1.5 rounded-lg bg-[#1a1e24] hover:bg-[#222831] border border-[#262b32] text-[#f3f4f6] font-semibold cursor-pointer transition-colors"
           >
             Cerrar
           </button>

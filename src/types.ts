@@ -344,7 +344,7 @@ export interface StreamDriveTask {
   speedMBs: number;
   torrentSpeedMBs?: number;
   peers?: number;
-  status: "idle" | "initializing" | "streaming" | "paused" | "completed" | "error";
+  status: "idle" | "initializing" | "streaming" | "paused" | "completed" | "error" | "queued";
   statusText?: string;
   error?: string;
   retries?: number;
@@ -354,6 +354,10 @@ export interface StreamDriveTask {
   startedAt: number;
   lastChunkAt?: number;
   completedAt?: number;
+  selectedFilePath?: string;
+  queueIndex?: number;
+  totalInBatch?: number;
+  batchId?: string;
 }
 
 export interface StreamManifestData {
@@ -377,6 +381,10 @@ export interface StreamManifestData {
   md5Checksum?: string;
   webSeeds?: string[];
   torrentBase64?: string;
+  selectedFilePath?: string;
+  queueIndex?: number;
+  totalInBatch?: number;
+  batchId?: string;
 }
 
 export interface DriveSessionAuditResult {

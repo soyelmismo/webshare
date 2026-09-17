@@ -38,7 +38,9 @@ export interface UnifiedJobItem {
   filename: string;
   sourceUrl: string;
   engineType: "stream" | "sequential" | "proxy";
-  status: "starting" | "streaming" | "downloading" | "paused" | "completed" | "failed" | "error" | "cancelled";
+  status: "starting" | "streaming" | "downloading" | "paused" | "completed" | "failed" | "error" | "cancelled" | "queued";
+  queueIndex?: number;
+  totalInBatch?: number;
   progressPercent: number;
   downloadSpeedStr: string;
   uploadSpeedStr: string;
@@ -180,9 +182,13 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
             ? "completed"
             : st.status === "paused"
             ? "paused"
+            : st.status === "queued"
+            ? "queued"
             : st.status === "error"
             ? "failed"
             : "starting",
+        queueIndex: st.queueIndex,
+        totalInBatch: st.totalInBatch,
         progressPercent: Math.round(st.progressPercent || 0),
         downloadSpeedStr: st.speedMBs ? `${st.speedMBs.toFixed(1)} MB/s` : "0 MB/s",
         uploadSpeedStr: st.speedMBs ? `${st.speedMBs.toFixed(1)} MB/s` : "0 MB/s",
@@ -287,7 +293,7 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
   useEffect(() => {
     fetchAllJobs();
     const hasActiveTasks = unifiedJobs.some(
-      (j) => j.status === "streaming" || j.status === "downloading" || j.status === "starting"
+      (j) => j.status === "streaming" || j.status === "downloading" || j.status === "starting" || j.status === "queued"
     );
     const intervalMs = hasActiveTasks ? 800 : 3000;
     const timer = setInterval(fetchAllJobs, intervalMs);
@@ -558,7 +564,7 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
   const filteredJobs = unifiedJobs.filter((job) => {
     // Filter by type/status
     if (filterType === "active") {
-      if (job.status !== "streaming" && job.status !== "downloading" && job.status !== "starting") return false;
+      if (job.status !== "streaming" && job.status !== "downloading" && job.status !== "starting" && job.status !== "queued") return false;
     } else if (filterType === "stream") {
       if (job.engineType !== "stream") return false;
     } else if (filterType === "sequential") {
@@ -580,7 +586,7 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
 
   // Helper stats
   const activeCount = unifiedJobs.filter(
-    (j) => j.status === "streaming" || j.status === "downloading" || j.status === "starting"
+    (j) => j.status === "streaming" || j.status === "downloading" || j.status === "starting" || j.status === "queued"
   ).length;
   const completedCount = unifiedJobs.filter((j) => j.status === "completed").length;
 
@@ -827,6 +833,8 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
                         ? "bg-[#064e3b] text-[#34d399] border border-[#059669]/60"
                         : selectedJob.status === "streaming" || selectedJob.status === "downloading"
                         ? "bg-[#1e3a8a]/40 text-[#60a5fa] border border-[#3b82f6]/40 animate-pulse"
+                        : selectedJob.status === "queued"
+                        ? "bg-[#78350f]/30 text-[#f59e0b] border border-[#f59e0b]/40 font-semibold"
                         : selectedJob.status === "paused"
                         ? "bg-[#78350f]/40 text-[#f59e0b] border border-[#f59e0b]/40"
                         : selectedJob.status === "failed" || selectedJob.status === "error"
@@ -834,7 +842,9 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
                         : "bg-[#1f242c] text-[#9ca3af] border border-[#3b424d]"
                     }`}
                   >
-                    {selectedJob.status}
+                    {selectedJob.status === "queued"
+                      ? `En cola ${selectedJob.queueIndex ? `#${selectedJob.queueIndex}${selectedJob.totalInBatch ? `/${selectedJob.totalInBatch}` : ""}` : ""}`
+                      : selectedJob.status}
                   </span>
                 </div>
 
@@ -1054,6 +1064,8 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
                                 ? "text-[#34d399]"
                                 : job.status === "streaming" || job.status === "downloading"
                                 ? "text-[#60a5fa] animate-pulse"
+                                : job.status === "queued"
+                                ? "text-[#f59e0b]"
                                 : job.status === "paused"
                                 ? "text-[#f59e0b]"
                                 : job.status === "failed" || job.status === "error"
@@ -1061,7 +1073,9 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
                                 : "text-[#9ca3af]"
                             }`}
                           >
-                            {job.status}
+                            {job.status === "queued"
+                              ? `En cola ${job.queueIndex ? `#${job.queueIndex}${job.totalInBatch ? `/${job.totalInBatch}` : ""}` : ""}`
+                              : job.status}
                           </span>
                         </td>
 

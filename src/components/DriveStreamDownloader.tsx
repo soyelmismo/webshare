@@ -30,6 +30,7 @@ import {
   StreamTask,
   StreamSourceInfo,
   startStreamJob,
+  startBatchStreamJob,
   inspectStreamUrl,
   cancelStreamJob,
   getStreamTasks,
@@ -234,19 +235,17 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
       // If multi-file torrent and multiple files selected
       if (sourceInfo?.files && sourceInfo.files.length > 1 && selectedFilePaths.size > 0) {
         const filesToQueue = sourceInfo.files.filter((f) => selectedFilePaths.has(f.path));
-        for (const file of filesToQueue) {
-          const res = await startStreamJob({
-            sourceUrl: url.trim() || `torrent_file_${file.name}`,
-            targetFilename: file.name,
-            folderId: targetFolder,
-            accountEmail: activeAccountEmail,
-            accessToken: activeTokenStr,
-            chunkSizeMB: Number(chunkSizeMB) || 25,
-            torrentBase64: torrentBase64 || undefined,
-            selectedFilePath: file.path,
-            selectedFileSize: file.length,
-          });
-          setActiveTaskId(res.task.id);
+        const batchRes = await startBatchStreamJob({
+          sourceUrl: url.trim() || `torrent_batch_${filesToQueue.length}`,
+          folderId: targetFolder,
+          accountEmail: activeAccountEmail,
+          accessToken: activeTokenStr,
+          chunkSizeMB: Number(chunkSizeMB) || 25,
+          torrentBase64: torrentBase64 || undefined,
+          files: filesToQueue.map((f) => ({ path: f.path, length: f.length, name: f.name })),
+        });
+        if (batchRes.tasks && batchRes.tasks.length > 0) {
+          setActiveTaskId(batchRes.tasks[0].id);
         }
       } else {
         // Single file / direct download

@@ -69,6 +69,27 @@ export async function startStreamToDrive(params: {
   return await res.json();
 }
 
+export async function startBatchStreamToDrive(params: {
+  sourceUrl: string;
+  accessToken: string;
+  folderId: string;
+  accountEmail?: string;
+  customChunkSizeMB?: number;
+  torrentBase64?: string;
+  files: Array<{ path: string; length: number; name?: string }>;
+}): Promise<{ success: boolean; batchId: string; count: number; tasks: StreamDriveTask[] }> {
+  const res = await fetch("/api/stream/start-batch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error(err.error || "Error al iniciar lote en cola a Google Drive");
+  }
+  return await res.json();
+}
+
 export async function pauseStreamTask(taskId: string, accessToken?: string): Promise<boolean> {
   const res = await fetch("/api/stream/pause", {
     method: "POST",

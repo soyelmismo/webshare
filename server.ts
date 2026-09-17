@@ -1887,8 +1887,8 @@ app.use(express.json({ limit: "50mb" }));
       if (accessToken && tasks.length > 0) {
         const endTime = Date.now() + 5000;
         for (const t of tasks) {
-          if (t.status === "streaming") {
-            while (Date.now() < endTime && t.status === "streaming") {
+          if (t.status === "streaming" || t.status === "queued") {
+            while (Date.now() < endTime && (t.status === "streaming" || t.status === "queued")) {
               const processed = await streamManager
                 .processNextChunk(t.id, accessToken, folderId, accountEmail)
                 .catch(() => false);
@@ -1936,6 +1936,40 @@ app.use(express.json({ limit: "50mb" }));
       res.json({ success: true, task });
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Error al iniciar streaming a Google Drive" });
+    }
+  });
+
+  app.post("/api/stream/start-batch", async (req, res) => {
+    try {
+      const {
+        sourceUrl,
+        accessToken,
+        folderId,
+        accountEmail,
+        customChunkSizeMB,
+        torrentBase64,
+        files,
+      } = req.body;
+
+      if (!sourceUrl) return res.status(400).json({ error: "Falta 'sourceUrl'" });
+      if (!accessToken) return res.status(400).json({ error: "Falta 'accessToken' de Google Drive" });
+      if (!files || !Array.isArray(files) || files.length === 0) {
+        return res.status(400).json({ error: "Falta lista de archivos 'files'" });
+      }
+
+      const result = await streamManager.startBatchStreamTasks({
+        sourceUrl,
+        accessToken,
+        folderId: folderId || "",
+        accountEmail,
+        customChunkSizeMB: customChunkSizeMB ? Number(customChunkSizeMB) : undefined,
+        torrentBase64,
+        files,
+      });
+
+      res.json({ success: true, batchId: result.batchId, count: result.tasks.length, tasks: result.tasks });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || "Error al iniciar lote en cola a Google Drive" });
     }
   });
 

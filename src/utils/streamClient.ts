@@ -3,6 +3,7 @@ import {
   inspectStreamSource,
   fetchStreamTasks,
   startStreamToDrive,
+  startBatchStreamToDrive,
   cancelStreamTask,
 } from "./streamApi";
 
@@ -54,6 +55,27 @@ export async function startStreamJob(params: {
     selectedFileSize: params.selectedFileSize,
   });
   return { task: result.task };
+}
+
+export async function startBatchStreamJob(params: {
+  sourceUrl: string;
+  folderId?: string;
+  accountEmail?: string;
+  accessToken: string;
+  chunkSizeMB?: number;
+  torrentBase64?: string;
+  files: Array<{ path: string; length: number; name?: string }>;
+}): Promise<{ batchId: string; tasks: StreamTask[] }> {
+  const result = await startBatchStreamToDrive({
+    sourceUrl: params.sourceUrl,
+    accessToken: params.accessToken,
+    folderId: params.folderId || "root",
+    accountEmail: params.accountEmail,
+    customChunkSizeMB: params.chunkSizeMB,
+    torrentBase64: params.torrentBase64,
+    files: params.files,
+  });
+  return { batchId: result.batchId, tasks: result.tasks };
 }
 
 export async function cancelStreamJob(taskId: string): Promise<void> {

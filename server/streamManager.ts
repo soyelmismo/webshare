@@ -704,6 +704,11 @@ export class StreamTransferManager {
     torrentBase64?: string;
     selectedFilePath?: string;
     selectedFileSize?: number;
+    queueIndex?: number;
+    totalInBatch?: number;
+    batchId?: string;
+    skipSessionInit?: boolean;
+    initialStatus?: "streaming" | "queued";
   }): Promise<StreamDriveTask> {
     const {
       sourceUrl,
@@ -715,6 +720,11 @@ export class StreamTransferManager {
       torrentBase64,
       selectedFilePath,
       selectedFileSize,
+      queueIndex,
+      totalInBatch,
+      batchId,
+      skipSessionInit = false,
+      initialStatus,
     } = params;
 
     // Deduplication check: if a task exists for exact same sourceUrl AND selectedFilePath/fileName
@@ -724,7 +734,7 @@ export class StreamTransferManager {
         ? `${existingTask.sourceUrl}_${(existingTask as any).selectedFilePath}`
         : existingTask.sourceUrl;
       if (
-        (existingTask.status === "streaming" || existingTask.status === "paused") &&
+        (existingTask.status === "streaming" || existingTask.status === "paused" || existingTask.status === "queued") &&
         existingKey === targetDedupeKey
       ) {
         console.log(`[StreamManager] Retornando tarea existente (${existingTask.id}) para URL/archivo: ${targetDedupeKey}`);
@@ -791,13 +801,22 @@ export class StreamTransferManager {
 
     const taskId = `stream_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
-    // 1. Initialize Google Drive resumable upload session
-    const sessionUri = await this.initDriveResumableUpload(
-      accessToken,
-      folderId,
-      fileName,
-      inspected.fileSize
-    );
+    // 1. Initialize Google Drive resumable upload session (deferred if queued / skipSessionInit)
+    let sessionUri = "";
+    const taskStatus = initialStatus || (skipSessionInit ? "queued" : "streaming");
+
+    if (!skipSessionInit && taskStatus === "streaming") {
+      try {
+        sessionUri = await this.initDriveResumableUpload(
+          accessToken,
+          folderId,
+          fileName,
+          inspected.fileSize
+        );
+      } catch (err: any) {
+        console.warn("[StreamManager] No se pudo crear sesión de Drive de inmediato, dejando en cola:", err.message);
+      }
+    }
 
     const totalChunks = Math.ceil(inspected.fileSize / chunkSizeBytes);
 
@@ -822,46 +841,115 @@ export class StreamTransferManager {
       totalChunks,
       progressPercent: 0,
       speedMBs: 0,
-      status: "streaming",
+      status: taskStatus,
       startedAt: Date.now(),
       selectedFilePath,
+      queueIndex,
+      totalInBatch,
+      batchId,
     } as any;
 
     this.tasks.set(taskId, task);
     this.saveTasksToDisk();
 
-    // 2. Initial manifest write to Drive
-    try {
-      const manifestId = await this.saveManifestToDrive(accessToken, folderId, {
-        version: 1,
-        taskId,
-        accountEmail: accountEmail || undefined,
-        fileName,
-        sourceUrl,
-        sourceType: inspected.sourceType,
-        torrentBase64: task.torrentBase64,
-        webSeeds: task.webSeeds,
-        fileSize: inspected.fileSize,
-        chunkSizeBytes,
-        resumableUploadUrl: sessionUri,
-        driveFolderId: folderId,
-        uploadedBytes: 0,
-        currentChunkIndex: 0,
-        totalChunks,
-        status: "streaming",
-        startedAt: task.startedAt,
-        updatedAt: Date.now(),
-      });
-      task.manifestFileId = manifestId;
-      this.saveTasksToDisk();
-    } catch (e) {
-      console.warn("Advertencia: No se pudo crear el archivo manifiesto en Drive:", e);
+    // 2. Initial manifest write to Drive if session was initialized
+    if (sessionUri) {
+      try {
+        const manifestId = await this.saveManifestToDrive(accessToken, folderId, {
+          version: 1,
+          taskId,
+          accountEmail: accountEmail || undefined,
+          fileName,
+          sourceUrl,
+          sourceType: inspected.sourceType,
+          torrentBase64: task.torrentBase64,
+          webSeeds: task.webSeeds,
+          fileSize: inspected.fileSize,
+          chunkSizeBytes,
+          resumableUploadUrl: sessionUri,
+          driveFolderId: folderId,
+          uploadedBytes: 0,
+          currentChunkIndex: 0,
+          totalChunks,
+          status: taskStatus,
+          startedAt: task.startedAt,
+          updatedAt: Date.now(),
+          selectedFilePath,
+          queueIndex,
+          totalInBatch,
+          batchId,
+        });
+        task.manifestFileId = manifestId;
+        this.saveTasksToDisk();
+      } catch (e) {
+        console.warn("Advertencia: No se pudo crear el archivo manifiesto en Drive:", e);
+      }
     }
 
-    // 3. Launch background streaming process
-    this.runStreamingLoop(taskId, accessToken);
+    // 3. Launch background streaming process if active
+    if (task.status === "streaming") {
+      this.runStreamingLoop(taskId, accessToken);
+    }
 
     return task;
+  }
+
+  /**
+   * Starts a batch of files in queue, avoiding rate limits by deferring Drive session initialization.
+   */
+  public async startBatchStreamTasks(params: {
+    sourceUrl: string;
+    accessToken: string;
+    folderId: string;
+    accountEmail?: string;
+    customChunkSizeMB?: number;
+    torrentBase64?: string;
+    files: Array<{ path: string; length: number; name?: string }>;
+  }): Promise<{ batchId: string; tasks: StreamDriveTask[] }> {
+    const {
+      sourceUrl,
+      accessToken,
+      folderId,
+      accountEmail,
+      customChunkSizeMB,
+      torrentBase64,
+      files,
+    } = params;
+
+    const batchId = `batch_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const createdTasks: StreamDriveTask[] = [];
+
+    const activeCount = Array.from(this.tasks.values()).filter(
+      (t) =>
+        t.status === "streaming" &&
+        (!accountEmail || !t.accountEmail || t.accountEmail.toLowerCase() === accountEmail.toLowerCase())
+    ).length;
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const isFirstActive = i === 0 && activeCount < 2;
+
+      const task = await this.startStreamTask({
+        sourceUrl,
+        accessToken,
+        folderId,
+        accountEmail,
+        customChunkSizeMB,
+        customFileName: file.name || file.path.split("/").pop(),
+        torrentBase64,
+        selectedFilePath: file.path,
+        selectedFileSize: file.length,
+        queueIndex: i + 1,
+        totalInBatch: files.length,
+        batchId,
+        skipSessionInit: !isFirstActive,
+        initialStatus: isFirstActive ? "streaming" : "queued",
+      });
+
+      createdTasks.push(task);
+    }
+
+    return { batchId, tasks: createdTasks };
   }
 
   /**
@@ -874,7 +962,7 @@ export class StreamTransferManager {
     activeAccountEmail?: string
   ): Promise<boolean> {
     const task = this.tasks.get(taskId);
-    if (!task || task.status !== "streaming" || (task as any).isProcessingChunk) {
+    if (!task || (task.status !== "streaming" && task.status !== "queued") || (task as any).isProcessingChunk) {
       return false;
     }
 
@@ -889,6 +977,76 @@ export class StreamTransferManager {
       task.accountEmail.toLowerCase() !== activeAccountEmail.toLowerCase()
     ) {
       return false;
+    }
+
+    // 1. Queue Promotion Check
+    if (task.status === "queued") {
+      const activeStreamingCount = Array.from(this.tasks.values()).filter(
+        (t) =>
+          t.status === "streaming" &&
+          (!task.accountEmail || !t.accountEmail || t.accountEmail.toLowerCase() === task.accountEmail.toLowerCase())
+      ).length;
+
+      if (activeStreamingCount >= 2) {
+        // Limit of 2 concurrent active streams reached; remain queued
+        return false;
+      }
+
+      task.status = "streaming";
+      this.saveTasksToDisk();
+    }
+
+    // 2. On-demand Google Drive Resumable Session Initialization
+    if (!task.resumableUploadUrl) {
+      try {
+        console.log(`[StreamManager] Inicializando sesión de Google Drive bajo demanda para tarea en cola: ${task.fileName}`);
+        const sessionUri = await this.initDriveResumableUpload(
+          accessToken,
+          task.driveFolderId,
+          task.fileName,
+          task.fileSize
+        );
+        task.resumableUploadUrl = sessionUri;
+
+        // Create manifest on Drive
+        const manifestId = await this.saveManifestToDrive(accessToken, task.driveFolderId, {
+          version: 1,
+          taskId: task.id,
+          accountEmail: task.accountEmail,
+          fileName: task.fileName,
+          sourceUrl: task.sourceUrl,
+          sourceType: task.sourceType,
+          torrentBase64: task.torrentBase64,
+          webSeeds: task.webSeeds,
+          fileSize: task.fileSize,
+          chunkSizeBytes: task.chunkSizeBytes,
+          resumableUploadUrl: sessionUri,
+          driveFolderId: task.driveFolderId,
+          uploadedBytes: task.uploadedBytes,
+          currentChunkIndex: task.currentChunkIndex,
+          totalChunks: task.totalChunks,
+          status: "streaming",
+          startedAt: task.startedAt,
+          updatedAt: Date.now(),
+          selectedFilePath: task.selectedFilePath,
+          queueIndex: task.queueIndex,
+          totalInBatch: task.totalInBatch,
+          batchId: task.batchId,
+        });
+        task.manifestFileId = manifestId;
+        this.saveTasksToDisk();
+      } catch (err: any) {
+        console.warn(`[StreamManager] Error iniciando sesión de Drive para ${task.id}:`, err.message);
+        if (err.message?.includes("429")) {
+          console.warn("[StreamManager] Rate limit 429 de Google Drive en cola. Reintentando en el siguiente ciclo.");
+          task.status = "queued";
+          return false;
+        }
+        task.status = "error";
+        task.error = err.message || "Error al iniciar sesión en Google Drive";
+        this.saveTasksToDisk();
+        return false;
+      }
     }
 
     if (task.uploadedBytes >= task.fileSize) {
@@ -1777,11 +1935,15 @@ export class StreamTransferManager {
           totalChunks: manifest.totalChunks,
           progressPercent,
           speedMBs: 0,
-          status: isFinished ? "completed" : (manifest.status === "paused" ? "paused" : "streaming"),
+          status: isFinished ? "completed" : (manifest.status === "paused" ? "paused" : (manifest.status === "queued" ? "queued" : "streaming")),
           startedAt: manifest.startedAt,
           completedAt: isFinished ? manifest.updatedAt || Date.now() : undefined,
           finalDriveFileId: manifest.finalDriveFileId,
           md5Checksum: manifest.md5Checksum,
+          selectedFilePath: manifest.selectedFilePath,
+          queueIndex: manifest.queueIndex,
+          totalInBatch: manifest.totalInBatch,
+          batchId: manifest.batchId,
         };
 
         this.tasks.set(manifest.taskId, recoveredTask);

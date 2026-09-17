@@ -1901,7 +1901,7 @@ app.use(express.json({ limit: "50mb" }));
   app.post("/api/stream/start", async (req, res) => {
     try {
       const { sourceUrl, accessToken, folderId, customChunkSizeMB, customFileName,
-        torrentBase64 } = req.body;
+        torrentBase64, selectedFilePath, selectedFileSize } = req.body;
       if (!sourceUrl) return res.status(400).json({ error: "Falta 'sourceUrl'" });
       if (!accessToken) return res.status(400).json({ error: "Falta 'accessToken' de Google Drive" });
 
@@ -1912,6 +1912,8 @@ app.use(express.json({ limit: "50mb" }));
         customChunkSizeMB: customChunkSizeMB ? Number(customChunkSizeMB) : 16,
         customFileName,
         torrentBase64,
+        selectedFilePath,
+        selectedFileSize: selectedFileSize ? Number(selectedFileSize) : undefined,
       });
 
       res.json({ success: true, task });

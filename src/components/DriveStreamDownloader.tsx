@@ -18,6 +18,13 @@ import {
   Database,
   ArrowRight,
   Activity,
+  Folder,
+  FolderPlus,
+  FileUp,
+  ListFilter,
+  CheckSquare,
+  FileText,
+  FolderOpen,
 } from "lucide-react";
 import {
   StreamTask,
@@ -28,7 +35,19 @@ import {
   getStreamTasks,
 } from "../utils/streamClient";
 import { StoredDriveSession, loadDriveSession, onDriveSessionChange } from "../utils/driveStorage";
+import { listUserFolders, createDriveFolder } from "../utils/googleDriveApi";
+import { DriveFolderInfo } from "../types";
 import { UnifiedJobList } from "./UnifiedJobList";
+
+function formatBytes(bytes: number, decimals = 2): string {
+  if (!bytes || bytes <= 0) return "0 Bytes";
+  const k = 1024;
+  const dm = decimals < 0 ? 0 : decimals;
+  const sizes = ["Bytes", "KB", "MB", "GB", "TB", "PB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  const val = parseFloat((bytes / Math.pow(k, i)).toFixed(dm));
+  return `${val} ${sizes[i]}`;
+}
 
 interface DriveStreamDownloaderProps {
   session?: StoredDriveSession;
@@ -65,12 +84,29 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
   }, []);
 
   const currentSession = session;
+  const activeToken = accessToken || currentSession?.token || null;
+  const hasToken = Boolean(activeToken);
+
   const [url, setUrl] = useState("");
   const [customFilename, setCustomFilename] = useState("");
   const [chunkSizeMB, setChunkSizeMB] = useState(25);
+  const [torrentBase64, setTorrentBase64] = useState<string | null>(null);
+
+  // Folder selection state
+  const [userFolders, setUserFolders] = useState<DriveFolderInfo[]>([]);
+  const [selectedFolderId, setSelectedFolderId] = useState<string>(
+    () => propFolderId || currentSession?.dedicatedFolderId || currentSession?.folder?.id || "root"
+  );
+  const [isFoldersLoading, setIsFoldersLoading] = useState(false);
+  const [showCreateFolder, setShowCreateFolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
+  const [isCreatingFolder, setIsCreatingFolder] = useState(false);
+
+  // Inspection & Multi-file torrent state
   const [isInspectLoading, setIsInspectLoading] = useState(false);
   const [sourceInfo, setSourceInfo] = useState<StreamSourceInfo | null>(null);
   const [inspectError, setInspectError] = useState<string | null>(null);
+  const [selectedFilePaths, setSelectedFilePaths] = useState<Set<string>>(new Set());
 
   // Active Jobs state
   const [tasks, setTasks] = useState<StreamTask[]>([]);
@@ -78,15 +114,27 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
   const [isStarting, setIsStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
 
-  const activeToken = accessToken || currentSession?.token || null;
-  const hasToken = Boolean(activeToken);
-  const activeTask = tasks.find((t) => t.id === activeTaskId) || tasks[0];
-
   const handleOpenConnect = () => {
     if (onConnectDrive) onConnectDrive();
     else if (onOpenCookieModal) onOpenCookieModal();
     else if (onNavigateToDriveTab) onNavigateToDriveTab();
   };
+
+  // Fetch Drive folders when token is active
+  useEffect(() => {
+    if (!activeToken) return;
+    setIsFoldersLoading(true);
+    listUserFolders(activeToken)
+      .then((folders) => {
+        setUserFolders(folders);
+        if (!selectedFolderId || selectedFolderId === "root") {
+          const dedicated = currentSession?.dedicatedFolderId || currentSession?.folder?.id;
+          if (dedicated) setSelectedFolderId(dedicated);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setIsFoldersLoading(false));
+  }, [activeToken, currentSession, selectedFolderId]);
 
   // Poll tasks every 1.5s
   useEffect(() => {
@@ -108,30 +156,67 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
     return () => clearInterval(interval);
   }, [activeTaskId]);
 
-  const handleInspect = async (targetUrl?: string) => {
+  const handleCreateNewFolder = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeToken || !newFolderName.trim()) return;
+    setIsCreatingFolder(true);
+    try {
+      const created = await createDriveFolder(activeToken, newFolderName.trim());
+      setUserFolders((prev) => [...prev, created]);
+      setSelectedFolderId(created.id);
+      setShowCreateFolder(false);
+      setNewFolderName("");
+    } catch (err: any) {
+      alert(err.message || "No se pudo crear la carpeta en Google Drive");
+    } finally {
+      setIsCreatingFolder(false);
+    }
+  };
+
+  const handleInspect = async (targetUrl?: string, overrideTorrentB64?: string) => {
     const inspectUrl = targetUrl || url.trim();
-    if (!inspectUrl) return;
+    const b64 = overrideTorrentB64 !== undefined ? overrideTorrentB64 : torrentBase64;
+    if (!inspectUrl && !b64) return;
 
     setIsInspectLoading(true);
     setInspectError(null);
     setSourceInfo(null);
 
     try {
-      const info = await inspectStreamUrl(inspectUrl);
+      const info = await inspectStreamUrl(inspectUrl, b64 || undefined);
       setSourceInfo(info);
       if (info.suggestedFilename && !customFilename) {
         setCustomFilename(info.suggestedFilename);
       }
+      if (info.files && info.files.length > 0) {
+        // By default select all files in multi-file torrent
+        setSelectedFilePaths(new Set(info.files.map((f) => f.path)));
+      }
     } catch (err: any) {
-      setInspectError(err.message || "Error al inspeccionar la URL");
+      setInspectError(err.message || "Error al inspeccionar el enlace o torrent");
     } finally {
       setIsInspectLoading(false);
     }
   };
 
+  const handleTorrentFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const b64 = (reader.result as string).split(",")[1];
+      setTorrentBase64(b64);
+      const cleanName = file.name.replace(/\.torrent$/i, "");
+      setUrl(`torrent_file_${file.name}`);
+      setCustomFilename(cleanName);
+      handleInspect(`torrent_file_${file.name}`, b64);
+    };
+    reader.readAsDataURL(file);
+  };
+
   const handleStartStream = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!url.trim() || isStarting) return;
+    if ((!url.trim() && !torrentBase64) || isStarting) return;
 
     if (!hasToken) {
       setStartError("Debes vincular tu cuenta de Google Drive para iniciar el streaming.");
@@ -142,18 +227,38 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
     setStartError(null);
 
     try {
-      const activeToken = accessToken || currentSession?.token || "";
-      const targetFolder = propFolderId || currentSession?.dedicatedFolderId || currentSession?.folder?.id;
-      const result = await startStreamJob({
-        sourceUrl: url.trim(),
-        targetFilename: customFilename.trim() || undefined,
-        folderId: targetFolder || undefined,
-        accessToken: activeToken,
-        chunkSizeMB: Number(chunkSizeMB) || 25,
-      });
+      const activeTokenStr = activeToken || "";
+      const targetFolder = selectedFolderId || propFolderId || currentSession?.dedicatedFolderId || currentSession?.folder?.id || "root";
 
-      setActiveTaskId(result.task.id);
-      // Refresh task list
+      // If multi-file torrent and multiple files selected
+      if (sourceInfo?.files && sourceInfo.files.length > 1 && selectedFilePaths.size > 0) {
+        const filesToQueue = sourceInfo.files.filter((f) => selectedFilePaths.has(f.path));
+        for (const file of filesToQueue) {
+          const res = await startStreamJob({
+            sourceUrl: url.trim() || `torrent_file_${file.name}`,
+            targetFilename: file.name,
+            folderId: targetFolder,
+            accessToken: activeTokenStr,
+            chunkSizeMB: Number(chunkSizeMB) || 25,
+            torrentBase64: torrentBase64 || undefined,
+            selectedFilePath: file.path,
+            selectedFileSize: file.length,
+          });
+          setActiveTaskId(res.task.id);
+        }
+      } else {
+        // Single file / direct download
+        const result = await startStreamJob({
+          sourceUrl: url.trim(),
+          targetFilename: customFilename.trim() || undefined,
+          folderId: targetFolder,
+          accessToken: activeTokenStr,
+          chunkSizeMB: Number(chunkSizeMB) || 25,
+          torrentBase64: torrentBase64 || undefined,
+        });
+        setActiveTaskId(result.task.id);
+      }
+
       const list = await getStreamTasks();
       setTasks(list);
     } catch (err: any) {
@@ -163,20 +268,29 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
     }
   };
 
-  const handleCancelTask = async (taskId: string) => {
-    try {
-      await cancelStreamJob(taskId);
-      const list = await getStreamTasks();
-      setTasks(list);
-    } catch (err) {
-      console.error(err);
+  const toggleSelectFile = (path: string) => {
+    setSelectedFilePaths((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
+
+  const toggleSelectAllFiles = () => {
+    if (!sourceInfo?.files) return;
+    if (selectedFilePaths.size === sourceInfo.files.length) {
+      setSelectedFilePaths(new Set());
+    } else {
+      setSelectedFilePaths(new Set(sourceInfo.files.map((f) => f.path)));
     }
   };
 
   const setPresetUrl = (presetUrl: string, presetName: string) => {
+    setTorrentBase64(null);
     setUrl(presetUrl);
     setCustomFilename(presetName);
-    handleInspect(presetUrl);
+    handleInspect(presetUrl, "");
   };
 
   return (
@@ -189,10 +303,10 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
           </div>
           <div>
             <h2 className="text-base font-bold text-[#f3f4f6]">
-              Streaming Directo de URL a Google Drive (RAM Pipeline)
+              Streaming Directo de URL / Torrent a Google Drive
             </h2>
             <p className="text-xs text-[#9ca3af]">
-              Transfiere archivos gigantes (ISOs, backups, datasets) descargando fragmentos a RAM y subiéndolos concurrentemente sin saturar el almacenamiento en disco.
+              Soporta URLs HTTP/HTTPS, enlaces Magnet y archivos .torrent multi-archivo. Transfiere directo a cualquier carpeta de tu Google Drive.
             </p>
           </div>
         </div>
@@ -218,27 +332,110 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
       <div className="bg-[#14171a] border border-[#22272e] rounded-xl p-4 space-y-4">
         <h3 className="text-sm font-bold text-[#f3f4f6] flex items-center gap-2">
           <Sliders className="w-4 h-4 text-[#10b981]" />
-          Configurar Nueva Transferencia Stream
+          Configurar Nueva Transferencia
         </h3>
 
         <form onSubmit={handleStartStream} className="space-y-4">
+          {/* Target Folder Selector */}
+          <div className="p-3 bg-[#101317] border border-[#22272e] rounded-lg space-y-2">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-bold text-[#10b981] flex items-center gap-1.5">
+                <FolderOpen className="w-4 h-4" />
+                Carpeta Destino en Google Drive:
+              </label>
+              <button
+                type="button"
+                onClick={() => setShowCreateFolder(!showCreateFolder)}
+                className="text-xs text-[#34d399] hover:underline flex items-center gap-1 font-semibold cursor-pointer"
+              >
+                <FolderPlus className="w-3.5 h-3.5" />
+                + Crear Carpeta
+              </button>
+            </div>
+
+            {showCreateFolder ? (
+              <div className="flex items-center gap-2 pt-1">
+                <input
+                  type="text"
+                  value={newFolderName}
+                  onChange={(e) => setNewFolderName(e.target.value)}
+                  placeholder="Nombre de nueva carpeta (ej: Películas / Torrents)"
+                  className="flex-1 px-3 py-1.5 bg-[#171b21] border border-[#3b424d] rounded-lg text-xs text-[#f3f4f6] focus:outline-none focus:border-[#10b981]"
+                />
+                <button
+                  type="button"
+                  onClick={handleCreateNewFolder}
+                  disabled={isCreatingFolder || !newFolderName.trim()}
+                  className="px-3 py-1.5 rounded-lg text-xs font-bold bg-[#10b981] hover:bg-[#059669] text-[#0b0d0e] cursor-pointer disabled:opacity-50"
+                >
+                  {isCreatingFolder ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : "Crear"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowCreateFolder(false)}
+                  className="px-2.5 py-1.5 rounded-lg text-xs bg-[#1f242c] text-[#9ca3af] hover:text-[#f3f4f6]"
+                >
+                  Cancelar
+                </button>
+              </div>
+            ) : (
+              <select
+                value={selectedFolderId}
+                onChange={(e) => setSelectedFolderId(e.target.value)}
+                disabled={isFoldersLoading}
+                className="w-full px-3 py-2 bg-[#171b21] border border-[#22272e] rounded-lg text-xs font-mono text-[#f3f4f6] focus:outline-none focus:border-[#10b981] cursor-pointer"
+              >
+                <option value="root">📁 Mi Unidad (Carpeta Raíz)</option>
+                {currentSession?.folder && (
+                  <option value={currentSession.folder.id}>
+                    ⭐ {currentSession.folder.name} (Carpeta Dedicada)
+                  </option>
+                )}
+                {userFolders
+                  .filter((f) => f.id !== currentSession?.folder?.id)
+                  .map((f) => (
+                    <option key={f.id} value={f.id}>
+                      📂 {f.name}
+                    </option>
+                  ))}
+              </select>
+            )}
+          </div>
+
+          {/* URL or Torrent Upload */}
           <div className="space-y-1">
-            <label className="text-xs font-semibold text-[#9ca3af] block">
-              URL de Descarga Directa (HTTP / HTTPS):
-            </label>
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-semibold text-[#9ca3af] block">
+                Origen: Enlace HTTP, Magnet URL o Archivo .torrent:
+              </label>
+              <label className="text-xs text-[#34d399] hover:underline cursor-pointer flex items-center gap-1">
+                <FileUp className="w-3.5 h-3.5" />
+                <span>Cargar .torrent</span>
+                <input
+                  type="file"
+                  accept=".torrent"
+                  onChange={handleTorrentFileUpload}
+                  className="hidden"
+                />
+              </label>
+            </div>
+
             <div className="flex flex-col sm:flex-row gap-2">
               <input
-                type="url"
-                required
+                type="text"
+                required={!torrentBase64}
                 value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                placeholder="https://releases.ubuntu.com/24.04/ubuntu-24.04-desktop-amd64.iso"
+                onChange={(e) => {
+                  setUrl(e.target.value);
+                  setTorrentBase64(null);
+                }}
+                placeholder="https://.../iso.iso o magnet:?xt=urn:btih:..."
                 className="flex-1 px-3 py-2 bg-[#101317] border border-[#22272e] rounded-lg text-xs font-mono text-[#f3f4f6] placeholder-[#6b7280] focus:outline-none focus:border-[#10b981]"
               />
               <button
                 type="button"
                 onClick={() => handleInspect()}
-                disabled={isInspectLoading || !url.trim()}
+                disabled={isInspectLoading || (!url.trim() && !torrentBase64)}
                 className="px-3.5 py-2 rounded-lg text-xs font-semibold bg-[#1f242c] hover:bg-[#262b32] text-[#f3f4f6] border border-[#3b424d] transition-colors cursor-pointer disabled:opacity-50 shrink-0"
               >
                 {isInspectLoading ? (
@@ -279,17 +476,70 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
 
           {/* Source Info Alert */}
           {sourceInfo && (
-            <div className="p-3 rounded-lg bg-[#101317] border border-[#22272e] font-mono text-xs space-y-1">
+            <div className="p-3 rounded-lg bg-[#101317] border border-[#22272e] font-mono text-xs space-y-2">
               <div className="flex items-center justify-between font-bold text-[#f3f4f6]">
-                <span>Archivo: {sourceInfo.suggestedFilename}</span>
+                <span className="flex items-center gap-1.5">
+                  {sourceInfo.sourceType === "torrent" ? (
+                    <FileCode className="w-4 h-4 text-[#10b981]" />
+                  ) : (
+                    <DownloadCloud className="w-4 h-4 text-[#10b981]" />
+                  )}
+                  {sourceInfo.suggestedFilename}
+                </span>
                 <span className="text-[#34d399]">
-                  {sourceInfo.contentLengthFormatted || "Tamaño dinámico / Chunked"}
+                  {sourceInfo.fileSizeFormatted || formatBytes(sourceInfo.fileSize || 0)}
                 </span>
               </div>
-              <div className="flex flex-wrap gap-4 text-[#9ca3af] text-[11px]">
-                <span>MIME: {sourceInfo.contentType}</span>
-                <span>Rangos HTTP (Byte-ranges): {sourceInfo.acceptsRanges ? "Sí (Soportado)" : "No"}</span>
-              </div>
+
+              {/* Multi-file Torrent Selector */}
+              {sourceInfo.files && sourceInfo.files.length > 1 && (
+                <div className="pt-2 border-t border-[#22272e] space-y-2">
+                  <div className="flex items-center justify-between text-[#9ca3af]">
+                    <span className="font-bold text-[#f3f4f6] flex items-center gap-1">
+                      <ListFilter className="w-3.5 h-3.5 text-[#10b981]" />
+                      Archivos en el Torrent ({sourceInfo.files.length}):
+                    </span>
+                    <button
+                      type="button"
+                      onClick={toggleSelectAllFiles}
+                      className="text-[11px] text-[#34d399] hover:underline cursor-pointer"
+                    >
+                      {selectedFilePaths.size === sourceInfo.files.length ? "Deseleccionar Todos" : "Seleccionar Todos"}
+                    </button>
+                  </div>
+
+                  <div className="max-h-48 overflow-y-auto space-y-1 pr-1">
+                    {sourceInfo.files.map((file, idx) => {
+                      const isSelected = selectedFilePaths.has(file.path);
+                      return (
+                        <div
+                          key={idx}
+                          onClick={() => toggleSelectFile(file.path)}
+                          className={`flex items-center justify-between p-1.5 rounded cursor-pointer transition-colors ${
+                            isSelected
+                              ? "bg-[#064e3b]/30 border border-[#059669]/40 text-[#f3f4f6]"
+                              : "bg-[#171b21] hover:bg-[#1f242c] text-[#9ca3af]"
+                          }`}
+                        >
+                          <div className="flex items-center gap-2 truncate pr-2">
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => {}}
+                              className="accent-[#10b981] rounded"
+                            />
+                            <FileText className="w-3.5 h-3.5 shrink-0 text-[#10b981]" />
+                            <span className="truncate text-[11px]">{file.name}</span>
+                          </div>
+                          <span className="text-[10px] font-mono text-[#34d399] shrink-0">
+                            {formatBytes(file.length)}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -342,7 +592,7 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
           <div className="flex justify-end pt-1">
             <button
               type="submit"
-              disabled={isStarting || !url.trim()}
+              disabled={isStarting || (!url.trim() && !torrentBase64)}
               className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-xs font-bold bg-[#10b981] hover:bg-[#059669] text-[#0b0d0e] transition-colors cursor-pointer disabled:opacity-50 shadow-sm"
             >
               {isStarting ? (
@@ -365,7 +615,7 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
       <UnifiedJobList
         session={propSession}
         accessToken={accessToken}
-        folderId={propFolderId}
+        folderId={selectedFolderId || propFolderId}
         folderName={_folderName}
         onOpenConnectModal={onOpenCookieModal}
       />

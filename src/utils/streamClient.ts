@@ -14,10 +14,13 @@ export interface StreamSourceInfo {
   fileSize?: number;
   fileSizeFormatted?: string;
   acceptRanges?: boolean;
+  sourceType?: "direct" | "torrent";
+  files?: Array<{ name: string; length: number; path: string }>;
+  torrentBase64?: string;
 }
 
-export async function inspectStreamUrl(url: string): Promise<StreamSourceInfo> {
-  const info = await inspectStreamSource(url);
+export async function inspectStreamUrl(url: string, torrentBase64?: string): Promise<StreamSourceInfo> {
+  const info = await inspectStreamSource(url, torrentBase64);
   return {
     ...info,
     suggestedFilename: info.fileName,
@@ -34,6 +37,9 @@ export async function startStreamJob(params: {
   folderId?: string;
   accessToken: string;
   chunkSizeMB?: number;
+  torrentBase64?: string;
+  selectedFilePath?: string;
+  selectedFileSize?: number;
 }): Promise<{ task: StreamTask }> {
   const result = await startStreamToDrive({
     sourceUrl: params.sourceUrl,
@@ -41,6 +47,9 @@ export async function startStreamJob(params: {
     folderId: params.folderId || "root",
     customFileName: params.targetFilename,
     customChunkSizeMB: params.chunkSizeMB,
+    torrentBase64: params.torrentBase64,
+    selectedFilePath: params.selectedFilePath,
+    selectedFileSize: params.selectedFileSize,
   });
   return { task: result.task };
 }

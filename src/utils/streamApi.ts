@@ -6,6 +6,8 @@ export async function inspectStreamSource(sourceUrl: string, torrentBase64?: str
   fileSizeFormatted: string;
   sourceType: "direct" | "torrent";
   acceptRanges: boolean;
+  files?: Array<{ name: string; length: number; path: string }>;
+  torrentBase64?: string;
 }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 12000);
@@ -51,6 +53,8 @@ export async function startStreamToDrive(params: {
   customChunkSizeMB?: number;
   customFileName?: string;
   torrentBase64?: string;
+  selectedFilePath?: string;
+  selectedFileSize?: number;
 }): Promise<{ success: boolean; task: StreamDriveTask }> {
   const res = await fetch("/api/stream/start", {
     method: "POST",

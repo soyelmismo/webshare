@@ -605,16 +605,31 @@ export class StreamTransferManager {
     customChunkSizeMB?: number;
     customFileName?: string;
     torrentBase64?: string;
+    selectedFilePath?: string;
+    selectedFileSize?: number;
   }): Promise<StreamDriveTask> {
-    const { sourceUrl, accessToken, folderId, customChunkSizeMB, customFileName, torrentBase64 } = params;
+    const {
+      sourceUrl,
+      accessToken,
+      folderId,
+      customChunkSizeMB,
+      customFileName,
+      torrentBase64,
+      selectedFilePath,
+      selectedFileSize,
+    } = params;
 
-    // Deduplication check: return existing task if currently active/streaming or paused for same sourceUrl
+    // Deduplication check: if a task exists for exact same sourceUrl AND selectedFilePath/fileName
+    const targetDedupeKey = selectedFilePath ? `${sourceUrl}_${selectedFilePath}` : sourceUrl;
     for (const existingTask of this.tasks.values()) {
+      const existingKey = (existingTask as any).selectedFilePath
+        ? `${existingTask.sourceUrl}_${(existingTask as any).selectedFilePath}`
+        : existingTask.sourceUrl;
       if (
         (existingTask.status === "streaming" || existingTask.status === "paused") &&
-        existingTask.sourceUrl === sourceUrl
+        existingKey === targetDedupeKey
       ) {
-        console.log(`[StreamManager] Retornando tarea existente (${existingTask.id}) para URL: ${sourceUrl}`);
+        console.log(`[StreamManager] Retornando tarea existente (${existingTask.id}) para URL/archivo: ${targetDedupeKey}`);
         return existingTask;
       }
     }
@@ -660,13 +675,18 @@ export class StreamTransferManager {
       }
     }
 
+    if (selectedFileSize && selectedFileSize > 0) {
+      inspected.fileSize = selectedFileSize;
+      inspected.fileSizeFormatted = formatBytes(selectedFileSize);
+    }
+
     if (!inspected.fileSize || inspected.fileSize <= 0) {
       throw new Error(
         "No se pudo determinar el tamaño del archivo de origen. Si es un enlace HTTP directo, el servidor remoto debe devolver la cabecera Content-Length. Si es un torrent, asegúrate de subir el archivo .torrent o usar un magnet con seeders activos."
       );
     }
 
-    const fileName = customFileName || inspected.fileName;
+    const fileName = customFileName || (selectedFilePath ? selectedFilePath.split("/").pop() : undefined) || inspected.fileName;
     // Chunk size: multiple of 256KB (262,144 bytes). Default: 16MB (fast for serverless & continuous servers).
     const chunkMB = Math.max(4, Math.min(customChunkSizeMB || 16, 64));
     const chunkSizeBytes = Math.floor((chunkMB * 1024 * 1024) / 262144) * 262144;
@@ -705,7 +725,8 @@ export class StreamTransferManager {
       speedMBs: 0,
       status: "streaming",
       startedAt: Date.now(),
-    };
+      selectedFilePath,
+    } as any;
 
     this.tasks.set(taskId, task);
     this.saveTasksToDisk();
@@ -1068,7 +1089,8 @@ export class StreamTransferManager {
       start,
       end,
       task?.torrentBase64 || torrentBase64,
-      signal
+      signal,
+      (task as any)?.selectedFilePath
     );
   }
 
@@ -1080,7 +1102,8 @@ export class StreamTransferManager {
     start: number,
     end: number,
     torrentBase64?: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    selectedFilePath?: string
   ): Promise<Buffer> {
     const torrent = await this.getOrCreateTorrent(torrentId, 60000, torrentBase64);
 
@@ -1088,11 +1111,17 @@ export class StreamTransferManager {
       throw new Error("No se encontraron archivos en el torrent.");
     }
 
-    // Find the primary ISO file
+    // Find target file (matching selectedFilePath or largest file)
     let targetFile = torrent.files[0];
-    for (const f of torrent.files) {
-      if (f.length > (targetFile ? targetFile.length : 0)) {
-        targetFile = f;
+    if (selectedFilePath) {
+      targetFile =
+        torrent.files.find((f: any) => f.path === selectedFilePath || f.name === selectedFilePath) ||
+        targetFile;
+    } else {
+      for (const f of torrent.files) {
+        if (f.length > (targetFile ? targetFile.length : 0)) {
+          targetFile = f;
+        }
       }
     }
 

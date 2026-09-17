@@ -1700,16 +1700,19 @@ export class StreamTransferManager {
     (task as any).isProcessingChunk = true;
     const now = Date.now();
     try {
-      // Sync committed bytes directly from Google Drive before fetching from source.
-      // This guarantees that multiple instances/tabs stay perfectly synchronized and
-      // never download or upload redundant chunks.
-      const committed = await this.queryDriveSessionCommittedBytes(task.resumableUploadUrl, task.fileSize);
-      if (committed > task.uploadedBytes) {
-        task.uploadedBytes = committed;
-        task.uploadedBytesFormatted = formatBytes(committed);
-        task.currentChunkIndex = Math.floor(committed / task.chunkSizeBytes);
-        task.progressPercent = Math.min(99, Math.round((committed / task.fileSize) * 100));
-        this.saveTasksToDisk();
+      // Sync committed bytes from Google Drive ONLY on initial chunk or after an error/interruption,
+      // avoiding redundant queryDriveSessionCommittedBytes HTTP calls on every single chunk upload.
+      // Normal sequential chunk transfers receive the confirmed byte offset directly from Google's HTTP 308 response.
+      if (((task as any).needsCommittedSync || task.uploadedBytes === 0) && task.resumableUploadUrl) {
+        (task as any).needsCommittedSync = false;
+        const committed = await this.queryDriveSessionCommittedBytes(task.resumableUploadUrl, task.fileSize);
+        if (committed > task.uploadedBytes) {
+          task.uploadedBytes = committed;
+          task.uploadedBytesFormatted = formatBytes(committed);
+          task.currentChunkIndex = Math.floor(committed / task.chunkSizeBytes);
+          task.progressPercent = Math.min(99, Math.round((committed / task.fileSize) * 100));
+          this.saveTasksToDisk();
+        }
       }
 
       if (task.uploadedBytes >= task.fileSize) {
@@ -1814,13 +1817,16 @@ export class StreamTransferManager {
         return true;
       } else if (driveRes.status >= 500) {
         console.warn(`[StreamManager] Drive status ${driveRes.status} al subir chunk`);
+        (task as any).needsCommittedSync = true;
         return false;
       } else {
         const errText = await driveRes.text();
+        (task as any).needsCommittedSync = true;
         throw new Error(`Google Drive HTTP ${driveRes.status}: ${errText}`);
       }
     } catch (err: any) {
       console.warn(`[StreamManager] Error procesando chunk para ${taskId}:`, err?.message);
+      (task as any).needsCommittedSync = true;
       task.error = err?.message;
       return false;
     } finally {

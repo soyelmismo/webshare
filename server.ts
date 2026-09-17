@@ -1874,6 +1874,8 @@ app.use(express.json({ limit: "50mb" }));
     }
   });
 
+  let hasAttemptedColdStartRecovery = false;
+
   app.get("/api/stream/tasks", async (req, res) => {
     try {
       const authHeader = req.headers.authorization;
@@ -1887,8 +1889,10 @@ app.use(express.json({ limit: "50mb" }));
 
       let tasks = streamManager.getTasks(folderId, accountEmail);
 
-      // On serverless / cold start, if memory is empty and access token is present, auto-recover from Drive
-      if (tasks.length === 0 && accessToken) {
+      // On serverless / cold start, if memory is empty and access token is present, auto-recover from Drive ONLY ONCE.
+      // NEVER poll Google Drive on every status check to avoid API rate limits.
+      if (Boolean(process.env.VERCEL) && !hasAttemptedColdStartRecovery && tasks.length === 0 && accessToken) {
+        hasAttemptedColdStartRecovery = true;
         tasks = await streamManager.recoverFromDriveFolder(accessToken, folderId, accountEmail);
       }
 

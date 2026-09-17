@@ -308,9 +308,25 @@ export async function downloadFileFromDrive(
 /**
  * List top-level or accessible folders in user's Google Drive
  */
+let cachedFoldersCache: { token: string; timestamp: number; folders: DriveFolderInfo[] } | null = null;
+
+/**
+ * List existing folders in user's Drive, with 30-second in-memory caching to prevent
+ * component re-renders from hammering Google Drive with search queries.
+ */
 export async function listUserFolders(
-  accessToken: string
+  accessToken: string,
+  forceRefresh: boolean = false
 ): Promise<DriveFolderInfo[]> {
+  if (
+    !forceRefresh &&
+    cachedFoldersCache &&
+    cachedFoldersCache.token === accessToken &&
+    Date.now() - cachedFoldersCache.timestamp < 30000
+  ) {
+    return cachedFoldersCache.folders;
+  }
+
   const query = `mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
   const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(
     query
@@ -328,11 +344,19 @@ export async function listUserFolders(
   }
 
   const data = await res.json();
-  return (data.files || []).map((f: any) => ({
+  const folders: DriveFolderInfo[] = (data.files || []).map((f: any) => ({
     id: f.id,
     name: f.name,
     webViewLink: f.webViewLink,
   }));
+
+  cachedFoldersCache = {
+    token: accessToken,
+    timestamp: Date.now(),
+    folders,
+  };
+
+  return folders;
 }
 
 /**
@@ -343,6 +367,7 @@ export async function createDriveFolder(
   folderName: string,
   parentId?: string
 ): Promise<DriveFolderInfo> {
+  cachedFoldersCache = null; // Invalidate folder cache upon creation
   const metadata: any = {
     name: folderName,
     mimeType: "application/vnd.google-apps.folder",

@@ -177,14 +177,17 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
     listUserFolders(activeToken)
       .then((folders) => {
         setUserFolders(folders);
-        if (!selectedFolderId || selectedFolderId === "root") {
-          const dedicated = currentSession?.dedicatedFolderId || currentSession?.folder?.id;
-          if (dedicated) setSelectedFolderId(dedicated);
-        }
+        setSelectedFolderId((prev) => {
+          if (!prev || prev === "root") {
+            const dedicated = currentSession?.dedicatedFolderId || currentSession?.folder?.id;
+            return dedicated || prev;
+          }
+          return prev;
+        });
       })
       .catch(() => {})
       .finally(() => setIsFoldersLoading(false));
-  }, [activeToken, currentSession, selectedFolderId]);
+  }, [activeToken]);
 
   // Poll tasks every 1.5s
   useEffect(() => {

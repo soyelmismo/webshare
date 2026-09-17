@@ -39,13 +39,13 @@ export const SystemWorkspace: React.FC<SystemWorkspaceProps> = ({
       id: "memory",
       label: "Memoria RAM",
       icon: <Layers className="w-3.5 h-3.5" />,
-      badge: `${serverSpecs.memory.usedPercent}%`,
+      badge: `${serverSpecs.memory.usagePercentage}%`,
     },
     {
       id: "storage",
       label: "Almacenamiento",
       icon: <Database className="w-3.5 h-3.5" />,
-      badge: `${serverSpecs.storage.mounts[0]?.usedPercent || 0}%`,
+      badge: `${serverSpecs.storage.mounts[0]?.usagePercentage || 0}%`,
     },
     {
       id: "network",

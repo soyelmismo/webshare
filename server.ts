@@ -31,12 +31,73 @@ interface HistoryPoint {
 const historyBuffer: HistoryPoint[] = [];
 const MAX_HISTORY = 40;
 
+let prevCpus = os.cpus();
+let simulatedLoad1m = 0.05;
+let simulatedLoad5m = 0.05;
+let simulatedLoad15m = 0.05;
+
+function getCalculatedLoadAvg(): [number, number, number] {
+  try {
+    const osLoads = os.loadavg();
+    // If OS reports real non-zero load (e.g. standard Linux OS), use it directly
+    if (osLoads && (osLoads[0] > 0 || osLoads[1] > 0 || osLoads[2] > 0)) {
+      return [osLoads[0], osLoads[1], osLoads[2]];
+    }
+
+    // Fallback for container runtime environments (Cloud Run / gVisor) where /proc/loadavg is hardcoded to 0
+    const currentCpus = os.cpus();
+    let totalDelta = 0;
+    let idleDelta = 0;
+
+    for (let i = 0; i < currentCpus.length; i++) {
+      const prevTimes = prevCpus[i]?.times || { user: 0, nice: 0, sys: 0, idle: 0, irq: 0 };
+      const currTimes = currentCpus[i].times;
+
+      const prevTotal = prevTimes.user + prevTimes.nice + prevTimes.sys + prevTimes.idle + prevTimes.irq;
+      const currTotal = currTimes.user + currTimes.nice + currTimes.sys + currTimes.idle + currTimes.irq;
+
+      totalDelta += Math.max(0, currTotal - prevTotal);
+      idleDelta += Math.max(0, currTimes.idle - prevTimes.idle);
+    }
+
+    prevCpus = currentCpus;
+
+    let activeRatio = 0.03; // Baseline activity ratio
+    if (totalDelta > 0) {
+      const computedRatio = 1 - idleDelta / totalDelta;
+      if (computedRatio > 0) {
+        activeRatio = computedRatio;
+      }
+    }
+
+    // Factor in active streaming or download tasks running in background
+    let activeTasksCount = 0;
+    try {
+      activeTasksCount = streamManager.getTasks().filter((t) => t.status === "streaming").length;
+    } catch (e) {
+      // ignore
+    }
+
+    const coresCount = Math.max(1, currentCpus.length);
+    const currentInstantLoad = Math.max(0.02, activeRatio * coresCount + activeTasksCount * 0.15);
+
+    // Smooth exponential moving averages
+    simulatedLoad1m = Number((simulatedLoad1m * 0.95 + currentInstantLoad * 0.05).toFixed(3));
+    simulatedLoad5m = Number((simulatedLoad5m * 0.98 + currentInstantLoad * 0.02).toFixed(3));
+    simulatedLoad15m = Number((simulatedLoad15m * 0.995 + currentInstantLoad * 0.005).toFixed(3));
+
+    return [simulatedLoad1m, simulatedLoad5m, simulatedLoad15m];
+  } catch (e) {
+    return [0.05, 0.05, 0.05];
+  }
+}
+
 function sampleServerMetrics() {
   try {
     const totalMem = os.totalmem();
     const freeMem = os.freemem();
     const usedMem = totalMem - freeMem;
-    const loadAvg = os.loadavg();
+    const loadAvg = getCalculatedLoadAvg();
     const memUsage = Math.round((usedMem / totalMem) * 100);
     const procMem = process.memoryUsage();
 
@@ -231,7 +292,7 @@ if (!fs.existsSync(SEQUENTIAL_BASE_DIR)) fs.mkdirSync(SEQUENTIAL_BASE_DIR, { rec
       const freeMem = os.freemem();
       const usedMem = totalMem - freeMem;
       const uptime = os.uptime();
-      const loadAvg = os.loadavg();
+      const loadAvg = getCalculatedLoadAvg();
       const networkInterfaces = os.networkInterfaces();
       const osRelease = parseOsRelease();
       const cpuinfo = parseProcCpuinfo();

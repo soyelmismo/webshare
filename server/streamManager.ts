@@ -1903,7 +1903,8 @@ export class StreamTransferManager {
       end,
       task?.torrentBase64 || torrentBase64,
       signal,
-      (task as any)?.selectedFilePath
+      (task as any)?.selectedFilePath,
+      task?.fileSize
     );
   }
 
@@ -1916,7 +1917,8 @@ export class StreamTransferManager {
     end: number,
     torrentBase64?: string,
     signal?: AbortSignal,
-    selectedFilePath?: string
+    selectedFilePath?: string,
+    selectedFileSize?: number
   ): Promise<Buffer> {
     const torrent = await this.getOrCreateTorrent(torrentId, 60000, torrentBase64);
 
@@ -1924,22 +1926,46 @@ export class StreamTransferManager {
       throw new Error("No se encontraron archivos en el torrent.");
     }
 
-    // Find target file (matching selectedFilePath or largest file)
-    let targetFile = torrent.files[0];
+    // Find target file (matching selectedFilePath with high precision)
+    let targetFile: any = null;
     if (selectedFilePath) {
-      const cleanTarget = selectedFilePath.replace(/\\/g, "/");
-      targetFile =
-        torrent.files.find((f: any) => {
-          const fPath = (f.path || "").replace(/\\/g, "/");
-          return (
-            fPath === cleanTarget ||
-            f.name === cleanTarget ||
-            fPath.endsWith("/" + cleanTarget) ||
-            cleanTarget.endsWith("/" + fPath) ||
-            fPath.split("/").pop() === cleanTarget.split("/").pop()
-          );
-        }) || targetFile;
-    } else {
+      const cleanTarget = selectedFilePath.replace(/\\/g, "/").trim();
+
+      // 1. Exact full path match
+      targetFile = torrent.files.find((f: any) => {
+        const fPath = (f.path || "").replace(/\\/g, "/").trim();
+        return fPath === cleanTarget;
+      });
+
+      // 2. Exact path suffix match (e.g. without root directory prefix)
+      if (!targetFile) {
+        targetFile = torrent.files.find((f: any) => {
+          const fPath = (f.path || "").replace(/\\/g, "/").trim();
+          return fPath.endsWith("/" + cleanTarget) || cleanTarget.endsWith("/" + fPath);
+        });
+      }
+
+      // 3. Name and exact size match (safely prevents collision between same filenames in different folders)
+      if (!targetFile && typeof selectedFileSize === "number" && selectedFileSize > 0) {
+        const targetName = cleanTarget.split("/").pop();
+        targetFile = torrent.files.find((f: any) => {
+          const fName = (f.name || "").replace(/\\/g, "/").trim();
+          return fName === targetName && f.length === selectedFileSize;
+        });
+      }
+
+      // 4. Fallback to unique name if only one file has that name in the entire torrent
+      if (!targetFile) {
+        const targetName = cleanTarget.split("/").pop();
+        const matches = torrent.files.filter((f: any) => f.name === targetName);
+        if (matches.length === 1) {
+          targetFile = matches[0];
+        }
+      }
+    }
+
+    // Default to largest file if no specific file found or specified
+    if (!targetFile) {
       for (const f of torrent.files) {
         if (f.length > (targetFile ? targetFile.length : 0)) {
           targetFile = f;

@@ -129,21 +129,34 @@ export function parseTorrentBuffer(buf: Buffer): InspectedFileInfo {
   if (info.files && Array.isArray(info.files)) {
     let total = 0;
     let largest = { name: "", length: 0 };
-    const rootName = Buffer.isBuffer(info.name)
-      ? info.name.toString("utf8")
-      : String(info.name || "").trim();
+    const rawRoot = info["name.utf-8"] || info["name.utf8"] || info.name;
+    const rootName = Buffer.isBuffer(rawRoot)
+      ? rawRoot.toString("utf8")
+      : String(rawRoot || "").trim();
 
     for (const f of info.files) {
       const len = typeof f.length === "number" ? f.length : 0;
       total += len;
-      const pathParts = Array.isArray(f.path)
-        ? f.path.map((p: any) => (Buffer.isBuffer(p) ? p.toString("utf8") : String(p)))
-        : [];
-      const fName = pathParts[pathParts.length - 1] || "file";
+      const rawPath = f["path.utf-8"] || f["path.utf8"] || f.path;
+      let pathParts: string[] = [];
+      if (Array.isArray(rawPath)) {
+        pathParts = rawPath.map((p: any) => (Buffer.isBuffer(p) ? p.toString("utf8") : String(p)));
+      } else if (Buffer.isBuffer(rawPath)) {
+        pathParts = rawPath.toString("utf8").replace(/\\/g, "/").split("/").filter(Boolean);
+      } else if (typeof rawPath === "string") {
+        pathParts = rawPath.replace(/\\/g, "/").split("/").filter(Boolean);
+      }
+      const rawName = f["name.utf-8"] || f["name.utf8"] || f.name;
+      const fName =
+        (rawName ? (Buffer.isBuffer(rawName) ? rawName.toString("utf8") : String(rawName)) : "") ||
+        pathParts[pathParts.length - 1] ||
+        "file";
       const relPath = pathParts.join("/");
       let fullPath = relPath;
       if (rootName && !relPath.startsWith(rootName + "/")) {
-        fullPath = `${rootName}/${relPath}`;
+        fullPath = relPath ? `${rootName}/${relPath}` : `${rootName}/${fName}`;
+      } else if (!fullPath) {
+        fullPath = fName;
       }
       files.push({ name: fName, length: len, path: fullPath });
       if (len > largest.length) {

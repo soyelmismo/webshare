@@ -26,6 +26,8 @@ import {
   FileText,
   FolderOpen,
   Download,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
 import {
   StreamTask,
@@ -109,6 +111,52 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
   const [sourceInfo, setSourceInfo] = useState<StreamSourceInfo | null>(null);
   const [inspectError, setInspectError] = useState<string | null>(null);
   const [selectedFilePaths, setSelectedFilePaths] = useState<Set<string>>(new Set());
+  const [fileViewMode, setFileViewMode] = useState<"tree" | "flat">("tree");
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
+
+  const toggleCollapseFolder = (folderPath: string) => {
+    setCollapsedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(folderPath)) {
+        next.delete(folderPath);
+      } else {
+        next.add(folderPath);
+      }
+      return next;
+    });
+  };
+
+  const toggleSelectFolderFiles = (filesInFolder: Array<{ path: string }>) => {
+    setSelectedFilePaths((prev) => {
+      const next = new Set(prev);
+      const allSelected = filesInFolder.every((f) => next.has(f.path));
+      if (allSelected) {
+        filesInFolder.forEach((f) => next.delete(f.path));
+      } else {
+        filesInFolder.forEach((f) => next.add(f.path));
+      }
+      return next;
+    });
+  };
+
+  // Group files by directory hierarchy
+  const folderGroups = React.useMemo(() => {
+    if (!sourceInfo?.files) return [];
+    const groupsMap = new Map<string, Array<{ name: string; length: number; path: string }>>();
+    for (const f of sourceInfo.files) {
+      const clean = f.path.replace(/\\/g, "/");
+      const dir = clean.includes("/") ? clean.substring(0, clean.lastIndexOf("/")) : "";
+      if (!groupsMap.has(dir)) {
+        groupsMap.set(dir, []);
+      }
+      groupsMap.get(dir)!.push(f);
+    }
+    return Array.from(groupsMap.entries()).sort(([a], [b]) => {
+      if (a === "" && b !== "") return -1;
+      if (b === "" && a !== "") return 1;
+      return a.localeCompare(b);
+    });
+  }, [sourceInfo?.files]);
 
   // Active Jobs state
   const [tasks, setTasks] = useState<StreamTask[]>([]);
@@ -503,55 +551,205 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
                 </span>
               </div>
 
-              {/* Multi-file Torrent Selector */}
+              {/* Multi-file Torrent Selector with Hierarchical Folder Tree */}
               {sourceInfo.files && sourceInfo.files.length > 1 && (
-                <div className="pt-2 border-t border-[#22272e] space-y-2">
-                  <div className="flex items-center justify-between text-[#9ca3af]">
-                    <span className="font-bold text-[#f3f4f6] flex items-center gap-1">
-                      <ListFilter className="w-3.5 h-3.5 text-[#10b981]" />
-                      Archivos en el Torrent ({sourceInfo.files.length}):
-                    </span>
-                    <button
-                      type="button"
-                      onClick={toggleSelectAllFiles}
-                      className="text-[11px] text-[#34d399] hover:underline cursor-pointer"
-                    >
-                      {selectedFilePaths.size === sourceInfo.files.length ? "Deseleccionar Todos" : "Seleccionar Todos"}
-                    </button>
-                  </div>
+                <div className="pt-2 border-t border-[#22272e] space-y-2.5">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[#9ca3af]">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-bold text-[#f3f4f6] flex items-center gap-1 text-xs">
+                        <ListFilter className="w-3.5 h-3.5 text-[#10b981]" />
+                        Archivos en el Torrent ({sourceInfo.files.length}):
+                      </span>
+                      <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-[#064e3b]/30 text-[#34d399] border border-[#059669]/50 flex items-center gap-1">
+                        <Folder className="w-3 h-3" />
+                        Jerarquía en Drive Activa
+                      </span>
+                    </div>
 
-                  <div className="max-h-48 overflow-y-auto space-y-1 pr-1">
-                    {sourceInfo.files.map((file, idx) => {
-                      const isSelected = selectedFilePaths.has(file.path);
-                      return (
-                        <div
-                          key={idx}
-                          onClick={() => toggleSelectFile(file.path)}
-                          className={`flex items-center justify-between p-1.5 rounded cursor-pointer transition-colors ${
-                            isSelected
-                              ? "bg-[#064e3b]/30 border border-[#059669]/40 text-[#f3f4f6]"
-                              : "bg-[#171b21] hover:bg-[#1f242c] text-[#9ca3af]"
+                    <div className="flex items-center gap-3">
+                      {/* View Mode Toggle: Tree vs Flat */}
+                      <div className="flex items-center bg-[#171b21] p-0.5 rounded border border-[#22272e] text-[10px]">
+                        <button
+                          type="button"
+                          onClick={() => setFileViewMode("tree")}
+                          className={`px-2 py-0.5 rounded font-semibold transition-colors cursor-pointer flex items-center gap-1 ${
+                            fileViewMode === "tree"
+                              ? "bg-[#1f242c] text-[#10b981] border border-[#3b424d]"
+                              : "text-[#9ca3af] hover:text-[#f3f4f6]"
                           }`}
                         >
-                          <div className="flex items-center gap-2 truncate pr-2">
-                            <input
-                              type="checkbox"
-                              checked={isSelected}
-                              onChange={() => {}}
-                              className="accent-[#10b981] rounded"
-                            />
-                            <FileText className="w-3.5 h-3.5 shrink-0 text-[#10b981]" />
-                            <span className="truncate text-[11px]" title={file.path}>
-                              {file.path && file.path.includes("/") ? file.path : file.name}
+                          <Folder className="w-2.5 h-2.5" />
+                          <span>Árbol</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setFileViewMode("flat")}
+                          className={`px-2 py-0.5 rounded font-semibold transition-colors cursor-pointer flex items-center gap-1 ${
+                            fileViewMode === "flat"
+                              ? "bg-[#1f242c] text-[#10b981] border border-[#3b424d]"
+                              : "text-[#9ca3af] hover:text-[#f3f4f6]"
+                          }`}
+                        >
+                          <FileText className="w-2.5 h-2.5" />
+                          <span>Lista Plana</span>
+                        </button>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={toggleSelectAllFiles}
+                        className="text-[11px] text-[#34d399] hover:underline cursor-pointer"
+                      >
+                        {selectedFilePaths.size === sourceInfo.files.length ? "Deseleccionar Todos" : "Seleccionar Todos"}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Banner explaining Drive folder mirroring */}
+                  <div className="p-2 rounded bg-[#101317] border border-[#22272e] text-[11px] text-[#9ca3af] flex items-center gap-2">
+                    <Folder className="w-3.5 h-3.5 text-[#10b981] shrink-0" />
+                    <span>
+                      Las subcarpetas del torrent se crearán automáticamente dentro de tu carpeta seleccionada de Google Drive.
+                    </span>
+                  </div>
+
+                  {fileViewMode === "tree" ? (
+                    /* HIERARCHICAL FOLDER TREE VIEW */
+                    <div className="max-h-64 overflow-y-auto space-y-2 pr-1">
+                      {folderGroups.map(([folderPath, filesInGroup]) => {
+                        const isCollapsed = collapsedFolders.has(folderPath);
+                        const selectedInGroup = filesInGroup.filter((f) => selectedFilePaths.has(f.path)).length;
+                        const allSelected = selectedInGroup === filesInGroup.length;
+                        const groupSize = filesInGroup.reduce((sum, f) => sum + f.length, 0);
+
+                        return (
+                          <div
+                            key={folderPath || "root"}
+                            className="bg-[#14171a] border border-[#22272e] rounded-lg overflow-hidden"
+                          >
+                            {/* Folder Header */}
+                            <div className="flex items-center justify-between p-2 bg-[#171b21] hover:bg-[#1a1f26] transition-colors">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <button
+                                  type="button"
+                                  onClick={() => toggleCollapseFolder(folderPath)}
+                                  className="text-[#9ca3af] hover:text-[#f3f4f6] cursor-pointer p-0.5"
+                                >
+                                  {isCollapsed ? (
+                                    <ChevronRight className="w-3.5 h-3.5" />
+                                  ) : (
+                                    <ChevronDown className="w-3.5 h-3.5" />
+                                  )}
+                                </button>
+                                <input
+                                  type="checkbox"
+                                  checked={allSelected}
+                                  onChange={() => toggleSelectFolderFiles(filesInGroup)}
+                                  className="accent-[#10b981] rounded cursor-pointer"
+                                />
+                                <Folder className="w-3.5 h-3.5 text-[#10b981] shrink-0" />
+                                <span
+                                  onClick={() => toggleCollapseFolder(folderPath)}
+                                  className="font-bold text-[#f3f4f6] text-xs truncate cursor-pointer font-mono"
+                                  title={folderPath || "Carpeta Principal"}
+                                >
+                                  {folderPath || "Carpeta Raíz del Torrent"}
+                                </span>
+                                <span className="text-[10px] text-[#6b7280] font-mono shrink-0">
+                                  ({selectedInGroup}/{filesInGroup.length} seleccionados)
+                                </span>
+                              </div>
+
+                              <span className="text-[10px] font-mono text-[#34d399] shrink-0 pl-2">
+                                {formatBytes(groupSize)}
+                              </span>
+                            </div>
+
+                            {/* Nested Files in Folder */}
+                            {!isCollapsed && (
+                              <div className="divide-y divide-[#22272e]/50 bg-[#101317] pl-6 pr-2 py-1 space-y-0.5">
+                                {filesInGroup.map((file, fIdx) => {
+                                  const isSelected = selectedFilePaths.has(file.path);
+                                  return (
+                                    <div
+                                      key={fIdx}
+                                      onClick={() => toggleSelectFile(file.path)}
+                                      className={`flex items-center justify-between py-1 px-2 rounded cursor-pointer transition-colors ${
+                                        isSelected
+                                          ? "text-[#f3f4f6] hover:bg-[#1a1f26]"
+                                          : "text-[#6b7280] hover:text-[#9ca3af] hover:bg-[#171b21]"
+                                      }`}
+                                    >
+                                      <div className="flex items-center gap-2 truncate pr-2">
+                                        <input
+                                          type="checkbox"
+                                          checked={isSelected}
+                                          onChange={() => {}}
+                                          className="accent-[#10b981] rounded"
+                                        />
+                                        <FileText className="w-3 h-3 text-[#10b981] shrink-0" />
+                                        <span className="truncate text-[11px] font-mono" title={file.path}>
+                                          {file.name}
+                                        </span>
+                                      </div>
+                                      <span className="text-[10px] font-mono text-[#34d399] shrink-0">
+                                        {formatBytes(file.length)}
+                                      </span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    /* FLAT LIST VIEW WITH PATH BADGES */
+                    <div className="max-h-56 overflow-y-auto space-y-1 pr-1">
+                      {sourceInfo.files.map((file, idx) => {
+                        const isSelected = selectedFilePaths.has(file.path);
+                        const hasFolder = file.path && file.path.includes("/");
+                        const folderPart = hasFolder ? file.path.substring(0, file.path.lastIndexOf("/")) : "";
+
+                        return (
+                          <div
+                            key={idx}
+                            onClick={() => toggleSelectFile(file.path)}
+                            className={`flex items-center justify-between p-1.5 rounded cursor-pointer transition-colors ${
+                              isSelected
+                                ? "bg-[#064e3b]/30 border border-[#059669]/40 text-[#f3f4f6]"
+                                : "bg-[#171b21] hover:bg-[#1f242c] text-[#9ca3af]"
+                            }`}
+                          >
+                            <div className="flex items-center gap-2 truncate pr-2">
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={() => {}}
+                                className="accent-[#10b981] rounded"
+                              />
+                              <FileText className="w-3.5 h-3.5 shrink-0 text-[#10b981]" />
+                              <div className="truncate flex items-center gap-1.5 min-w-0">
+                                {hasFolder && (
+                                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-[#1f242c] text-[#10b981] border border-[#3b424d] font-mono shrink-0 flex items-center gap-0.5">
+                                    <Folder className="w-2.5 h-2.5" />
+                                    <span className="truncate max-w-[120px]">{folderPart}</span>
+                                  </span>
+                                )}
+                                <span className="truncate text-[11px] font-mono" title={file.path}>
+                                  {file.name}
+                                </span>
+                              </div>
+                            </div>
+                            <span className="text-[10px] font-mono text-[#34d399] shrink-0">
+                              {formatBytes(file.length)}
                             </span>
                           </div>
-                          <span className="text-[10px] font-mono text-[#34d399] shrink-0">
-                            {formatBytes(file.length)}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               )}
             </div>

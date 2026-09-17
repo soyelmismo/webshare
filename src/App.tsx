@@ -89,21 +89,26 @@ export function App() {
   const loadSpecs = useCallback(async (isBackground = false) => {
     if (!isBackground) setIsRefreshing(true);
     try {
-      const [specs, hist, ping] = await Promise.all([
-        fetchServerSpecs(),
-        fetchServerHistory(),
-        measureServerPing(),
-      ]);
+      const specs = await fetchServerSpecs();
       setServerSpecs(specs);
-      setHistory(hist);
-      setApiLatency(ping);
       setError(null);
+
+      // Fetch non-blocking history and latency metrics asynchronously
+      fetchServerHistory().then(setHistory).catch(() => {});
+      measureServerPing().then(setApiLatency).catch(() => {});
     } catch (err: any) {
+      const errMsg =
+        typeof err === "string"
+          ? err
+          : err?.message && typeof err.message === "string"
+          ? err.message
+          : "No se pudo conectar con el servidor host";
+
       if (!isBackground) {
-        console.warn("Aviso al consultar especificaciones del servidor:", err?.message || err);
+        console.warn("Aviso al consultar especificaciones del servidor:", errMsg);
       }
       if (!serverSpecsRef.current) {
-        setError(err?.message || "No se pudo conectar con el servidor host");
+        setError(errMsg);
       }
     } finally {
       setIsLoading(false);

@@ -55,14 +55,17 @@ async function parseSafeJson<T>(res: Response, endpointLabel: string): Promise<T
 }
 
 export async function fetchServerSpecs(retries = 5, delayMs = 700): Promise<ServerSpecs> {
-  let lastError: any = null;
+  let lastErrorMsg = "No se pudo conectar con el servidor host";
+
+  const endpoints = ["/api/system/server-specs", "/api/server-specs"];
 
   for (let attempt = 1; attempt <= retries; attempt++) {
+    const endpoint = endpoints[(attempt - 1) % endpoints.length];
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 8000);
+      const timeoutId = setTimeout(() => controller.abort(), 12000);
 
-      const res = await fetch("/api/system/server-specs", {
+      const res = await fetch(endpoint, {
         signal: controller.signal,
         headers: {
           "Accept": "application/json",
@@ -78,7 +81,7 @@ export async function fetchServerSpecs(retries = 5, delayMs = 700): Promise<Serv
       }
       throw new Error("Datos de especificaciones incompletos recibidos del servidor");
     } catch (err: any) {
-      lastError = err;
+      lastErrorMsg = err?.message && typeof err.message === "string" ? err.message : "Error de red al consultar el servidor";
       // If we have retries left and it's a network/fetch failure, wait and retry
       if (attempt < retries) {
         const sleepTime = Math.min(2500, delayMs * Math.pow(1.3, attempt - 1));
@@ -90,11 +93,11 @@ export async function fetchServerSpecs(retries = 5, delayMs = 700): Promise<Serv
   // Fallback to cached specs if available before throwing
   const cached = getCachedServerSpecs();
   if (cached) {
-    console.warn("fetchServerSpecs agotó reintentos, utilizando caché local:", lastError?.message || lastError);
+    console.warn("fetchServerSpecs agotó reintentos, utilizando caché local:", lastErrorMsg);
     return cached;
   }
 
-  throw lastError || new Error("No se pudo conectar con el servidor host");
+  throw new Error(lastErrorMsg);
 }
 
 export async function fetchServerHistory(): Promise<ServerHistoryPoint[]> {

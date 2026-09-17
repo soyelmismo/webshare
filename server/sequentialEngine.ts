@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { formatBytes } from "./streamManager.js";
-import { SequentialStreamJob, SequentialEngineStatus } from "../src/types";
+import { SequentialStreamJob, SequentialEngineStatus } from "../src/types.js";
 
 export interface SequentialEngineStartOptions {
   url: string;

@@ -1,13 +1,13 @@
 import fs from "fs";
 import path from "path";
-import { StreamDriveTask, StreamManifestData, DriveSessionAuditResult } from "../src/types";
+import { StreamDriveTask, StreamManifestData, DriveSessionAuditResult } from "../src/types.js";
 import {
   inspectAnySource,
   formatBytes,
   parseTorrentBuffer,
   findFastestWebSeedMirror,
   InspectedFileInfo,
-} from "./torrentParser";
+} from "./torrentParser.js";
 
 export { formatBytes };
 

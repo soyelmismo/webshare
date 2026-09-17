@@ -233,6 +233,7 @@ export class StreamTransferManager {
   private activeAccountTokens: Map<string, string> = new Map();
   private isDispatchingQueue: boolean = false;
   private queueWatchdogTimer: NodeJS.Timeout | null = null;
+  private saveTasksDebounceTimer: NodeJS.Timeout | null = null;
 
   constructor() {
     this.cleanupDiskCache();
@@ -613,19 +614,42 @@ export class StreamTransferManager {
 
   /**
    * Persists active tasks to local disk cache to survive server restarts.
+   * Debounced to 1.5 seconds and non-blocking to prevent CPU/SD-card stall on edge devices.
    */
-  public saveTasksToDisk(): void {
-    try {
-      const list = Array.from(this.tasks.values());
-      fs.writeFileSync(TASKS_CACHE_FILE, JSON.stringify(list, null, 2), "utf-8");
-    } catch (e) {
-      console.warn("No se pudo persistir caché de tareas en disco:", e);
+  public saveTasksToDisk(immediate: boolean = false): void {
+    if (immediate) {
+      if (this.saveTasksDebounceTimer) {
+        clearTimeout(this.saveTasksDebounceTimer);
+        this.saveTasksDebounceTimer = null;
+      }
+      try {
+        const list = Array.from(this.tasks.values());
+        fs.writeFileSync(TASKS_CACHE_FILE, JSON.stringify(list, null, 2), "utf-8");
+      } catch (e) {
+        console.warn("No se pudo persistir caché de tareas en disco:", e);
+      }
+      return;
+    }
+
+    if (this.saveTasksDebounceTimer) return;
+    this.saveTasksDebounceTimer = setTimeout(() => {
+      this.saveTasksDebounceTimer = null;
+      try {
+        const list = Array.from(this.tasks.values());
+        fs.promises.writeFile(TASKS_CACHE_FILE, JSON.stringify(list, null, 2), "utf-8").catch(() => {});
+      } catch {}
+    }, 1500);
+
+    if (this.saveTasksDebounceTimer && typeof this.saveTasksDebounceTimer.unref === "function") {
+      this.saveTasksDebounceTimer.unref();
     }
   }
 
   /**
    * Safely destroys and unregisters any active WebTorrent instance associated with a task
    * to immediately release swarm connections, sockets, and in-memory piece buffers.
+   * If other tasks in a multi-file batch are still streaming or queued, deselects the finished file
+   * while keeping the swarm connection alive so subsequent files start instantaneously.
    */
   public async destroyTorrentForTask(task: StreamDriveTask): Promise<void> {
     const client = activeWebTorrentClient;
@@ -635,6 +659,39 @@ export class StreamTransferManager {
       task.torrentBase64,
       (task as any).infoHash,
     ].filter(Boolean) as string[];
+
+    // Check if there are other tasks (active or queued) that share this torrent/batch
+    const hasOtherPendingTasks = Array.from(this.tasks.values()).some((other) => {
+      if (other.id === task.id) return false;
+      if (other.status !== "streaming" && other.status !== "queued") return false;
+      if (task.batchId && other.batchId && task.batchId === other.batchId) return true;
+      if (task.sourceUrl && other.sourceUrl && task.sourceUrl === other.sourceUrl) return true;
+      if (task.torrentBase64 && other.torrentBase64 && task.torrentBase64 === other.torrentBase64) return true;
+      return false;
+    });
+
+    if (hasOtherPendingTasks) {
+      // Other files from this torrent are still streaming or queued in the batch!
+      // Deselect this finished file to stop downloading its pieces and release RAM,
+      // but KEEP the swarm connection and metadata alive for the remaining files.
+      try {
+        const activeTorrent =
+          this.torrentsMap.get(task.id) ||
+          (task.torrentBase64 ? this.torrentsMap.get(task.torrentBase64) : null) ||
+          this.torrentsMap.get(task.sourceUrl);
+        if (activeTorrent && activeTorrent.files) {
+          const file = activeTorrent.files.find((f: any) => {
+            const cleanPath = (f.path || "").replace(/\\/g, "/");
+            const taskPath = (task.selectedFilePath || "").replace(/\\/g, "/");
+            return cleanPath === taskPath || f.name === task.fileName;
+          });
+          if (file && typeof file.deselect === "function") {
+            file.deselect();
+          }
+        }
+      } catch {}
+      return;
+    }
 
     const destroyed = new Set<any>();
 
@@ -1168,7 +1225,7 @@ export class StreamTransferManager {
 
     // Resolve destination folder hierarchy in Google Drive if selectedFilePath has subdirectories
     let targetFolderId = folderId && folderId.trim() !== "" ? folderId.trim() : "root";
-    if (cleanSelectedPath && accessToken) {
+    if (!skipSessionInit && cleanSelectedPath && accessToken) {
       const pathParts = cleanSelectedPath.split("/").filter(Boolean);
       if (pathParts.length > 1) {
         const dirHierarchy = pathParts.slice(0, -1).join("/");
@@ -1466,6 +1523,13 @@ export class StreamTransferManager {
         if (err.message?.includes("429")) {
           console.warn("[StreamManager] Rate limit 429 de Google Drive en cola. Reintentando en el siguiente ciclo.");
           task.status = "queued";
+          return false;
+        }
+        if (err.message?.includes("401") || err.message?.includes("expirado") || err.message?.includes("Invalid Credentials")) {
+          console.warn(`[StreamManager] Token de Google Drive expirado (401) para tarea "${task.fileName}". Permanece en cola esperando reconexión.`);
+          task.status = "queued";
+          task.error = "Sesión de Google Drive expirada (401). Reconecta tu cuenta en el panel para continuar la cola.";
+          this.saveTasksToDisk();
           return false;
         }
         task.status = "error";

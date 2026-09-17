@@ -276,13 +276,12 @@ function runCpuWorkerBatch(durationMs: number): Promise<number> {
   });
 }
 
-async function startServer() {
-  const app = express();
+export const app = express();
+
 const SEQUENTIAL_BASE_DIR = path.join(os.tmpdir(), "sequential_downloads");
 if (!fs.existsSync(SEQUENTIAL_BASE_DIR)) fs.mkdirSync(SEQUENTIAL_BASE_DIR, { recursive: true });
-  const PORT = 3000;
 
-  app.use(express.json({ limit: "50mb" }));
+app.use(express.json({ limit: "50mb" }));
 
   // 1. API: Complete Server Specs (100% Server-Side)
   app.get(["/api/system/server-specs", "/api/server-specs"], (req, res) => {
@@ -2056,6 +2055,8 @@ if (!fs.existsSync(SEQUENTIAL_BASE_DIR)) fs.mkdirSync(SEQUENTIAL_BASE_DIR, { rec
     res.status(404).json({ error: `Ruta de API no encontrada: ${req.method} ${req.originalUrl}` });
   });
 
+async function startStandaloneServer() {
+  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
   // Vite middleware in dev or static serving in prod
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
@@ -2065,10 +2066,12 @@ if (!fs.existsSync(SEQUENTIAL_BASE_DIR)) fs.mkdirSync(SEQUENTIAL_BASE_DIR, { rec
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
+    if (fs.existsSync(distPath)) {
+      app.use(express.static(distPath));
+      app.get("*", (req, res) => {
+        res.sendFile(path.join(distPath, "index.html"));
+      });
+    }
   }
 
   app.listen(PORT, "0.0.0.0", () => {
@@ -2076,4 +2079,6 @@ if (!fs.existsSync(SEQUENTIAL_BASE_DIR)) fs.mkdirSync(SEQUENTIAL_BASE_DIR, { rec
   });
 }
 
-startServer();
+if (!process.env.VERCEL) {
+  startStandaloneServer();
+}

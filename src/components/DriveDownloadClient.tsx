@@ -102,25 +102,28 @@ export const DriveDownloadClient: React.FC<DriveDownloadClientProps> = ({
     const unsubscribe = onDriveSessionChange((updated) => {
       setDriveSession(updated);
       if (updated?.user) {
-        setCurrentUser({
-          uid: updated.user.uid || "google-user",
-          displayName: updated.user.displayName,
-          email: updated.user.email,
-          photoURL: updated.user.photoURL,
-          emailVerified: true,
-          isAnonymous: false,
-          metadata: {},
-          providerData: [],
-          refreshToken: "",
-          tenantId: null,
-          delete: async () => {},
-          getIdToken: async () => "",
-          getIdTokenResult: async () => ({} as any),
-          reload: async () => {},
-          toJSON: () => ({}),
-          phoneNumber: null,
-          providerId: "google.com",
-        } as unknown as User);
+        setCurrentUser((prev) => {
+          if (prev && prev.email === updated.user?.email) return prev;
+          return {
+            uid: updated.user.uid || "google-user",
+            displayName: updated.user.displayName,
+            email: updated.user.email,
+            photoURL: updated.user.photoURL,
+            emailVerified: true,
+            isAnonymous: false,
+            metadata: {},
+            providerData: [],
+            refreshToken: "",
+            tenantId: null,
+            delete: async () => {},
+            getIdToken: async () => "",
+            getIdTokenResult: async () => ({} as any),
+            reload: async () => {},
+            toJSON: () => ({}),
+            phoneNumber: null,
+            providerId: "google.com",
+          } as unknown as User;
+        });
       } else {
         setCurrentUser(null);
       }
@@ -395,6 +398,8 @@ export const DriveDownloadClient: React.FC<DriveDownloadClientProps> = ({
     loadFolderAndFiles(manualToken);
   };
 
+  const lastLoadedRef = useRef<string>("");
+
   // Load or create dedicated folder
   const loadFolderAndFiles = useCallback(
     async (token: string, nameToUse: string = folderName) => {
@@ -412,13 +417,14 @@ export const DriveDownloadClient: React.FC<DriveDownloadClientProps> = ({
       try {
         const folder = await getOrCreateDedicatedFolder(token, nameToUse);
         setFolderInfo(folder);
-        // Persist folder in client session cache and update specific account
-        saveDriveSession(token, 3600, currentUser, folder);
-        const currentActive = loadDriveSession().activeAccount;
-        if (currentActive) {
-          updateAccountFolder(currentActive.id, folder);
+        // Persist folder ONLY if changed to prevent event notification loop
+        if (session.folder?.id !== folder.id) {
+          saveDriveSession(token, 3600, session.user, folder);
+          const currentActive = session.activeAccount;
+          if (currentActive && currentActive.folder?.id !== folder.id) {
+            updateAccountFolder(currentActive.id, folder);
+          }
         }
-        setDriveSession(loadDriveSession());
         const folderFiles = await listFilesInFolder(token, folder.id);
         setFiles(folderFiles);
         setIsSessionExpired(false);
@@ -445,7 +451,7 @@ export const DriveDownloadClient: React.FC<DriveDownloadClientProps> = ({
         setIsFilesLoading(false);
       }
     },
-    [folderName, currentUser]
+    [folderName]
   );
 
   // When token is available, load the dedicated folder
@@ -459,9 +465,17 @@ export const DriveDownloadClient: React.FC<DriveDownloadClientProps> = ({
         );
         return;
       }
+
+      const cacheKey = `${accessToken}_${folderName}`;
+      if (lastLoadedRef.current === cacheKey) {
+        return;
+      }
+      lastLoadedRef.current = cacheKey;
       loadFolderAndFiles(accessToken);
+    } else {
+      lastLoadedRef.current = "";
     }
-  }, [accessToken, loadFolderAndFiles]);
+  }, [accessToken, folderName, loadFolderAndFiles]);
 
   // Refresh files list
   const handleRefreshFiles = async () => {

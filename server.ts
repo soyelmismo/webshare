@@ -9,15 +9,15 @@ import { Worker } from "worker_threads";
 import { spawn, execSync, type ChildProcess } from "child_process";
 import { Readable } from "stream";
 import { createServer as createViteServer } from "vite";
-import { streamManager } from "./server/streamManager";
-import { sequentialChunkEngine } from "./server/sequentialEngine";
+import { streamManager } from "./server/streamManager.js";
+import { sequentialChunkEngine } from "./server/sequentialEngine.js";
 import {
   createThrottledByteStream,
   streamThrottledBytesToResponse,
   testServerBackboneSpeed,
   BACKBONE_SERVERS,
   benchmarkAllBackboneServers,
-} from "./server/speedTestEngine";
+} from "./server/speedTestEngine.js";
 
 // Background rolling history buffer for server real-time charts
 interface HistoryPoint {

@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { formatBytes } from "./streamManager";
+import { formatBytes } from "./streamManager.js";
 import { SequentialStreamJob, SequentialEngineStatus } from "../src/types";
 
 export interface SequentialEngineStartOptions {

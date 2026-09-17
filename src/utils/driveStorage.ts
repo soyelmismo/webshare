@@ -344,11 +344,15 @@ export function loadDriveSession(): StoredDriveSession {
   }
 
   const now = Date.now();
-  const isAutoRenew = Boolean(activeAccount?.isAutoRenew);
-  const isExpired = isAutoRenew ? false : (expiresAt ? now > expiresAt : false);
-  const minutesRemaining = isAutoRenew
-    ? 999999
-    : (expiresAt ? Math.max(0, Math.round((expiresAt - now) / 60000)) : 60);
+  const hasTokenExpired = expiresAt ? now > expiresAt : false;
+  // Account is only treated as auto-renewing if the server has not confirmed that Rclone is unavailable
+  const isAutoRenew = Boolean(activeAccount?.isAutoRenew && isServerAutoRenewVerified !== false);
+  const isExpired = isAutoRenew
+    ? (hasTokenExpired && isServerAutoRenewVerified === false ? true : false)
+    : hasTokenExpired;
+  const minutesRemaining = isAutoRenew && !isExpired
+    ? (isServerAutoRenewVerified === true ? 999999 : (expiresAt ? Math.max(0, Math.round((expiresAt - now) / 60000)) : 60))
+    : (expiresAt ? Math.max(0, Math.round((expiresAt - now) / 60000)) : 0);
 
   return {
     token,
@@ -496,6 +500,10 @@ export async function verifyDriveToken(token: string): Promise<{
   }
 }
 
+// Server auto-renewal verification state:
+// null = not checked yet, true = backend confirmed Rclone active, false = backend returned 404 (no Rclone on server)
+export let isServerAutoRenewVerified: boolean | null = null;
+
 /**
  * Synchronizes the active Google Drive token from the backend if it is an auto-renewing Rclone account.
  */
@@ -505,9 +513,17 @@ export async function syncRcloneActiveToken(): Promise<string | null> {
   try {
     const emailParam = active.email ? `?email=${encodeURIComponent(active.email)}` : "";
     const res = await fetch(`/api/drive/rclone/active-token${emailParam}`);
-    if (!res.ok) return null;
+    if (!res.ok) {
+      if (res.status === 404 || res.status === 400) {
+        // Backend confirms Rclone auto-renewal is NOT configured on this machine/instance
+        isServerAutoRenewVerified = false;
+        notifySessionChange();
+      }
+      return null;
+    }
     const data = await res.json();
     if (data.token) {
+      isServerAutoRenewVerified = true;
       if (data.token !== active.token || (data.expiresAt && data.expiresAt !== active.expiresAt)) {
         active.token = data.token;
         if (data.expiresAt) active.expiresAt = data.expiresAt;
@@ -523,6 +539,12 @@ export async function syncRcloneActiveToken(): Promise<string | null> {
 
 // Background sync for auto-renewing rclone accounts
 if (typeof window !== "undefined") {
+  // Run initial check on startup
+  const initialActive = getActiveAccount();
+  if (initialActive?.isAutoRenew) {
+    syncRcloneActiveToken().catch(() => {});
+  }
+
   setInterval(() => {
     const active = getActiveAccount();
     if (active?.isAutoRenew) {

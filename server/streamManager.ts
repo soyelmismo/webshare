@@ -234,6 +234,8 @@ export class StreamTransferManager {
   // BitTorrent-style Queue Scheduler
   private maxConcurrentDownloads: number = 2;
   private activeAccountTokens: Map<string, string> = new Map();
+  private invalidTokens: Set<string> = new Set();
+  private authBlockedAccounts: Map<string, { blockedAt: number; reason: string; failedToken: string }> = new Map();
   private isDispatchingQueue: boolean = false;
   private queueWatchdogTimer: NodeJS.Timeout | null = null;
   private saveTasksDebounceTimer: NodeJS.Timeout | null = null;
@@ -272,29 +274,92 @@ export class StreamTransferManager {
 
   /**
    * Registers or updates an active OAuth access token in RAM for background queue dispatching.
+   * Rejects known expired/invalid tokens (e.g. from old browser tabs) and unblocks accounts upon fresh credentials.
    */
-  public recordAccountToken(accessToken: string, accountEmail?: string): void {
-    if (!accessToken || typeof accessToken !== "string") return;
+  public recordAccountToken(accessToken: string, accountEmail?: string): boolean {
+    if (!accessToken || typeof accessToken !== "string") return false;
     const cleanToken = accessToken.replace(/^Bearer\s+/i, "").trim();
-    if (!cleanToken) return;
+    if (!cleanToken) return false;
 
-    if (accountEmail && accountEmail.trim()) {
-      this.activeAccountTokens.set(accountEmail.trim().toLowerCase(), cleanToken);
+    // Reject tokens that have already been rejected by Google Drive with 401
+    if (this.invalidTokens.has(cleanToken)) {
+      return false;
+    }
+
+    const email = (accountEmail || "").trim().toLowerCase();
+
+    // Check if token is identical to current
+    const currentToken = email ? this.activeAccountTokens.get(email) : this.activeAccountTokens.get("__default__");
+    if (currentToken === cleanToken) {
+      return true;
+    }
+
+    if (email) {
+      this.activeAccountTokens.set(email, cleanToken);
+      const blocked = this.authBlockedAccounts.get(email);
+      if (blocked && blocked.failedToken !== cleanToken) {
+        console.log(`[StreamManager] Nueva credencial válida recibida para ${email}. Desbloqueando tareas en cola.`);
+        this.authBlockedAccounts.delete(email);
+      }
     }
     this.activeAccountTokens.set("__default__", cleanToken);
+
+    const defaultBlocked = this.authBlockedAccounts.get("");
+    if (defaultBlocked && defaultBlocked.failedToken !== cleanToken) {
+      this.authBlockedAccounts.delete("");
+    }
+
+    return true;
   }
 
   /**
-   * Retrieves the most relevant OAuth token for a given account.
+   * Invalidates an expired or rejected OAuth token (e.g. after HTTP 401).
+   * Prevents repeated failure cycles in dispatchQueue until fresh credentials arrive.
+   */
+  public invalidateAccountToken(failedToken?: string, accountEmail?: string, reason?: string): void {
+    const cleanFailed = failedToken ? failedToken.replace(/^Bearer\s+/i, "").trim() : "";
+    if (cleanFailed) {
+      this.invalidTokens.add(cleanFailed);
+    }
+
+    const email = (accountEmail || "").trim().toLowerCase();
+    if (email && this.activeAccountTokens.get(email) === cleanFailed) {
+      this.activeAccountTokens.delete(email);
+    }
+    if (this.activeAccountTokens.get("__default__") === cleanFailed) {
+      this.activeAccountTokens.delete("__default__");
+    }
+
+    this.authBlockedAccounts.set(email, {
+      blockedAt: Date.now(),
+      reason: reason || "Sesión de Google Drive expirada (HTTP 401)",
+      failedToken: cleanFailed,
+    });
+
+    console.warn(`[StreamManager] Token invalidado para '${email || "default"}': ${reason || "401"}. Tareas en cola pausadas esperando nuevas credenciales.`);
+  }
+
+  public isAccountAuthBlocked(accountEmail?: string): boolean {
+    const email = (accountEmail || "").trim().toLowerCase();
+    return this.authBlockedAccounts.has(email) || this.authBlockedAccounts.has("");
+  }
+
+  /**
+   * Retrieves the most relevant OAuth token for a given account, ignoring known rejected tokens.
    */
   public getAccountToken(accountEmail?: string): string | undefined {
     if (accountEmail && accountEmail.trim()) {
       const email = accountEmail.trim().toLowerCase();
-      if (this.activeAccountTokens.has(email)) {
-        return this.activeAccountTokens.get(email);
+      const token = this.activeAccountTokens.get(email);
+      if (token && !this.invalidTokens.has(token)) {
+        return token;
       }
     }
-    return this.activeAccountTokens.get("__default__");
+    const defaultToken = this.activeAccountTokens.get("__default__");
+    if (defaultToken && !this.invalidTokens.has(defaultToken)) {
+      return defaultToken;
+    }
+    return undefined;
   }
 
   /**
@@ -303,7 +368,7 @@ export class StreamTransferManager {
   public async getAccountTokenAsync(accountEmail?: string): Promise<string | undefined> {
     try {
       const rcloneToken = await rcloneAuthManager.getValidAccessToken(accountEmail);
-      if (rcloneToken) {
+      if (rcloneToken && !this.invalidTokens.has(rcloneToken)) {
         this.recordAccountToken(rcloneToken, accountEmail);
         return rcloneToken;
       }
@@ -361,13 +426,22 @@ export class StreamTransferManager {
       let promotedCount = 0;
       for (const task of queuedTasks) {
         if (promotedCount >= availableSlots) break;
+
+        const email = (task.accountEmail || "").trim().toLowerCase();
+        if (this.authBlockedAccounts.has(email) || this.authBlockedAccounts.has("")) {
+          // Do not promote tasks while waiting for reconnection of an expired account (prevents infinite 401 loop)
+          continue;
+        }
+
         const token = (await this.getAccountTokenAsync(task.accountEmail)) || this.getAccountToken(task.accountEmail);
-        if (!token) {
+        if (!token || this.invalidTokens.has(token)) {
           continue;
         }
 
         console.log(`[QueueScheduler] Promoviendo tarea de cola a streaming: #${task.queueIndex || 1} "${task.fileName}"`);
         task.status = "streaming";
+        task.error = undefined;
+        task.statusText = undefined;
         this.saveTasksToDisk();
 
         // Launch the autonomous streaming loop for this task
@@ -671,6 +745,13 @@ export class StreamTransferManager {
             if (t.status === "streaming") {
               t.status = "paused";
               t.speedMBs = 0;
+            } else if (t.status === "completed") {
+              // Ensure historical error messages are cleared from completed tasks
+              t.error = undefined;
+              t.statusText = undefined;
+              t.speedMBs = 0;
+              t.torrentSpeedMBs = 0;
+              t.progressPercent = 100;
             }
             // Ensure torrentBase64 is never duplicated in memory on individual tasks
             if (t.torrentBase64) {
@@ -1893,8 +1974,10 @@ export class StreamTransferManager {
           } catch {}
 
           console.warn(`[StreamManager] Token de Google Drive expirado (401) para tarea "${task.fileName}". Permanece en cola esperando reconexión.`);
+          this.invalidateAccountToken(accessToken, task.accountEmail, "Sesión de Google Drive expirada (401)");
           task.status = "queued";
           task.error = "Sesión de Google Drive expirada (401). Reconecta tu cuenta en el panel para continuar la cola.";
+          task.statusText = "Esperando reconexión (401)";
           this.saveTasksToDisk();
           return false;
         }
@@ -1907,8 +1990,11 @@ export class StreamTransferManager {
 
     if (task.uploadedBytes >= task.fileSize) {
       task.status = "completed";
+      task.error = undefined;
+      task.statusText = undefined;
       task.progressPercent = 100;
       task.speedMBs = 0;
+      task.torrentSpeedMBs = 0;
       task.completedAt = Date.now();
       this.saveTasksToDisk();
       return false;
@@ -1942,8 +2028,11 @@ export class StreamTransferManager {
 
       if (task.uploadedBytes >= task.fileSize) {
         task.status = "completed";
+        task.error = undefined;
+        task.statusText = undefined;
         task.progressPercent = 100;
         task.speedMBs = 0;
+        task.torrentSpeedMBs = 0;
         task.completedAt = Date.now();
         this.saveTasksToDisk();
         return true;
@@ -2053,6 +2142,8 @@ export class StreamTransferManager {
         if (driveRes.status === 200 || driveRes.status === 201 || end >= task.fileSize) {
           const resultData = driveRes.status !== 308 ? await driveRes.json().catch(() => ({})) : {};
           task.status = "completed";
+          task.error = undefined;
+          task.statusText = undefined;
           task.progressPercent = 100;
           task.speedMBs = 0;
           task.torrentSpeedMBs = 0;
@@ -2093,12 +2184,19 @@ export class StreamTransferManager {
       if (err?.message?.includes("401") || err?.message?.includes("expirado") || err?.message?.includes("Invalid Credentials")) {
         try {
           const refreshed = await rcloneAuthManager.forceRefreshToken(task.accountEmail);
-          if (refreshed) {
+          if (refreshed && !this.invalidTokens.has(refreshed)) {
             console.log(`[StreamManager] Token auto-renovado tras error 401 en chunk para ${task.fileName}. Reintentando chunk.`);
             this.recordAccountToken(refreshed, task.accountEmail);
             return await this.processNextChunk(taskId, refreshed, activeFolderId, activeAccountEmail);
           }
         } catch {}
+
+        this.invalidateAccountToken(accessToken, task.accountEmail, "Sesión expirada durante subida de chunk (HTTP 401)");
+        task.status = "queued";
+        task.error = "Sesión de Google Drive expirada (401). Reconecta tu cuenta en el panel para continuar la cola.";
+        task.statusText = "Esperando reconexión (401)";
+        this.saveTasksToDisk();
+        return false;
       }
 
       task.error = err?.message;
@@ -2712,6 +2810,10 @@ export class StreamTransferManager {
         task.currentChunkIndex = task.totalChunks;
         task.progressPercent = 100;
         task.status = "completed";
+        task.error = undefined;
+        task.statusText = undefined;
+        task.speedMBs = 0;
+        task.torrentSpeedMBs = 0;
         this.saveTasksToDisk();
 
         return {
@@ -2819,6 +2921,10 @@ export class StreamTransferManager {
           task.currentChunkIndex = task.totalChunks;
           task.progressPercent = 100;
           task.status = "completed";
+          task.error = undefined;
+          task.statusText = undefined;
+          task.speedMBs = 0;
+          task.torrentSpeedMBs = 0;
           this.saveTasksToDisk();
           return true;
         } else if (committed > 0) {
@@ -3300,6 +3406,10 @@ export class StreamTransferManager {
             localTask.currentChunkIndex = localTask.totalChunks;
             localTask.progressPercent = 100;
             localTask.status = "completed";
+            localTask.error = undefined;
+            localTask.statusText = undefined;
+            localTask.speedMBs = 0;
+            localTask.torrentSpeedMBs = 0;
           } else {
             localTask.uploadedBytes = committed;
             localTask.uploadedBytesFormatted = formatBytes(committed);

@@ -427,7 +427,7 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
         destination: "drive",
         startedAt: st.startedAt || Date.now(),
         completedAt: st.completedAt,
-        error: st.error,
+        error: st.status === "completed" ? undefined : st.error,
         webViewLink: st.webViewLink,
         savedToDrive: st.status === "completed",
         filePath: st.selectedFilePath,
@@ -451,7 +451,7 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
         destination: sj.destination || "drive",
         startedAt: sj.startedAt || Date.now(),
         completedAt: sj.completedAt,
-        error: sj.error,
+        error: sj.uploadStatus === "completed" || sj.savedToDrive || sj.status === "completed" ? undefined : sj.error,
         webViewLink: sj.driveFile?.webViewLink,
         filePath: sj.filePath,
         savedToDrive: sj.savedToDrive || sj.uploadStatus === "completed",
@@ -1358,10 +1358,23 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
                 onClick={() => setIsAccountDropdownOpen(!isAccountDropdownOpen)}
                 className="flex items-center gap-2 bg-[#1a1e24] hover:bg-[#222831] border border-[#262b32] rounded-lg px-3 py-1.5 transition-colors cursor-pointer text-xs font-medium text-[#f3f4f6]"
               >
-                <div className="w-2 h-2 rounded-full bg-[#10b981]" />
+                <div className={`w-2 h-2 rounded-full ${driveSession.isExpired ? "bg-[#ef4444]" : driveSession.activeAccount?.isAutoRenew ? "bg-[#34d399]" : "bg-[#10b981]"}`} />
                 <span className="font-mono text-xs truncate max-w-[130px]">
                   {driveSession.activeAccount?.email || driveSession.user?.email || "Google Drive"}
                 </span>
+                {driveSession.activeAccount?.isAutoRenew ? (
+                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-[#064e3b] text-[#34d399] border border-[#059669]/40 font-mono font-bold">
+                    24/7
+                  </span>
+                ) : driveSession.isExpired ? (
+                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-[#7f1d1d] text-[#f87171] border border-[#ef4444]/40 font-mono font-bold">
+                    Expirado
+                  </span>
+                ) : (
+                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-[#1f242c] text-[#9ca3af] font-mono">
+                    {driveSession.minutesRemaining}m
+                  </span>
+                )}
                 <ChevronDown className="w-3.5 h-3.5 text-[#9ca3af]" />
               </button>
             ) : (
@@ -1403,7 +1416,14 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
                         }`}
                       >
                         <div className="min-w-0">
-                          <p className="font-semibold text-[#f3f4f6] truncate">{acc.displayName || "Usuario"}</p>
+                          <div className="flex items-center gap-1.5">
+                            <p className="font-semibold text-[#f3f4f6] truncate">{acc.displayName || "Usuario"}</p>
+                            {acc.isAutoRenew && (
+                              <span className="text-[9px] px-1 py-0.2 rounded bg-[#064e3b] text-[#34d399] border border-[#059669]/40 font-mono">
+                                🔄 24/7
+                              </span>
+                            )}
+                          </div>
                           <p className="text-[10px] text-[#6b7280] truncate font-mono">{acc.email}</p>
                         </div>
                         {isActive && <Check className="w-3.5 h-3.5 text-[#10b981] shrink-0" />}

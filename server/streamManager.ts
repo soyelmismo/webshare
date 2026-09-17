@@ -413,14 +413,23 @@ export class StreamTransferManager {
   public getTasks(folderId?: string, accountEmail?: string): StreamDriveTask[] {
     const all = Array.from(this.tasks.values()).sort((a, b) => b.startedAt - a.startedAt);
     return all.filter((t) => {
-      if (folderId && folderId.trim() !== "" && t.driveFolderId && t.driveFolderId !== folderId) {
-        return false;
-      }
       if (
         accountEmail &&
         accountEmail.trim() !== "" &&
         t.accountEmail &&
-        t.accountEmail.toLowerCase() !== accountEmail.toLowerCase()
+        t.accountEmail.trim() !== "" &&
+        t.accountEmail.toLowerCase() !== accountEmail.trim().toLowerCase()
+      ) {
+        return false;
+      }
+      if (
+        folderId &&
+        folderId.trim() !== "" &&
+        folderId !== "root" &&
+        t.driveFolderId &&
+        t.driveFolderId.trim() !== "" &&
+        t.driveFolderId !== "root" &&
+        t.driveFolderId !== folderId
       ) {
         return false;
       }
@@ -1647,14 +1656,17 @@ export class StreamTransferManager {
         const manifest = (await contentRes.json()) as StreamManifestData;
         if (!manifest || !manifest.taskId || !manifest.resumableUploadUrl) continue;
 
-        // Clean up deleted tasks or duplicate manifest files from Drive
-        if (this.deletedTaskIds.has(manifest.taskId) || seenTaskIds.has(manifest.taskId)) {
+        // Delete duplicate manifest files from Drive if seen before
+        if (seenTaskIds.has(manifest.taskId)) {
           fetchWithRetry(`https://www.googleapis.com/drive/v3/files/${file.id}`, {
             method: "DELETE",
             headers: { Authorization: `Bearer ${accessToken}` },
           }).catch(() => {});
           continue;
         }
+
+        // Un-mark task from deletedTaskIds since we are recovering it
+        this.deletedTaskIds.delete(manifest.taskId);
 
         seenTaskIds.add(manifest.taskId);
 

@@ -59,14 +59,23 @@ export class SequentialChunkEngine {
   public getAllJobs(folderId?: string, accountEmail?: string): SequentialStreamJob[] {
     const all = Array.from(this.jobs.values()).sort((a, b) => b.startedAt - a.startedAt);
     return all.filter((j) => {
-      if (folderId && folderId.trim() !== "" && j.folderId && j.folderId !== folderId) {
-        return false;
-      }
       if (
         accountEmail &&
         accountEmail.trim() !== "" &&
         j.accountEmail &&
-        j.accountEmail.toLowerCase() !== accountEmail.toLowerCase()
+        j.accountEmail.trim() !== "" &&
+        j.accountEmail.toLowerCase() !== accountEmail.trim().toLowerCase()
+      ) {
+        return false;
+      }
+      if (
+        folderId &&
+        folderId.trim() !== "" &&
+        folderId !== "root" &&
+        j.folderId &&
+        j.folderId.trim() !== "" &&
+        j.folderId !== "root" &&
+        j.folderId !== folderId
       ) {
         return false;
       }

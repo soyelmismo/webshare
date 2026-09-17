@@ -323,12 +323,20 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
     setRecoveryNotice(null);
 
     try {
+      // Clear deleted jobs cache so recovered tasks are not filtered out locally
+      if (typeof window !== "undefined") {
+        try {
+          localStorage.removeItem(LOCAL_DELETED_JOBS_KEY);
+        } catch {}
+      }
+
       const res = await fetch("/api/stream/recover", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           accessToken: activeToken,
           folderId: activeFolderId,
+          accountEmail: activeAccountEmail,
         }),
       });
 

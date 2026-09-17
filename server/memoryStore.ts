@@ -17,14 +17,19 @@ export class BoundedMemoryChunkStore {
   public length: number;
   public lastChunkLength: number;
   public lastChunkIndex: number;
+  public minActivePieceIndex: number = 0;
   private maxCachedPieces: number;
 
   constructor(chunkLength: number, opts: any = {}) {
     this.chunkLength = Number(chunkLength);
     if (!this.chunkLength) throw new Error("First argument must be a valid chunk length");
     this.length = Number(opts.length) || Infinity;
-    // Default cap: 128 pieces (at 256KB = 32MB max buffer in RAM)
-    this.maxCachedPieces = typeof opts.maxCachedPieces === "number" ? opts.maxCachedPieces : 128;
+    // Allow buffering up to 256MB of pieces in RAM to support 16-64MB Google Drive chunks with double buffering
+    const targetBufferBytes = 256 * 1024 * 1024;
+    const piecesFor256MB = Math.ceil(targetBufferBytes / this.chunkLength);
+    this.maxCachedPieces = typeof opts.maxCachedPieces === "number"
+      ? opts.maxCachedPieces
+      : Math.max(2048, piecesFor256MB);
 
     if (this.length !== Infinity) {
       this.lastChunkLength = (this.length % this.chunkLength) || this.chunkLength;
@@ -48,16 +53,13 @@ export class BoundedMemoryChunkStore {
 
     this.chunks.set(index, buf);
 
-    // Auto-prune oldest pieces if buffer exceeds capacity limit
-    while (this.chunks.size > this.maxCachedPieces) {
-      let minKey = Infinity;
+    // Auto-prune only confirmed older pieces strictly before minActivePieceIndex if buffer exceeds capacity
+    if (this.chunks.size > this.maxCachedPieces) {
       for (const k of this.chunks.keys()) {
-        if (k < minKey) minKey = k;
-      }
-      if (minKey !== Infinity && minKey < index) {
-        this.chunks.delete(minKey);
-      } else {
-        break;
+        if (k < this.minActivePieceIndex) {
+          this.chunks.delete(k);
+          if (this.chunks.size <= this.maxCachedPieces) break;
+        }
       }
     }
 
@@ -73,7 +75,7 @@ export class BoundedMemoryChunkStore {
 
     let buf = this.chunks.get(index);
     if (!buf) {
-      const err: any = new Error("Chunk not found");
+      const err: any = new Error(`Chunk ${index} not found in memory store`);
       err.notFound = true;
       return queueMicrotask(() => cb(err));
     }
@@ -94,6 +96,7 @@ export class BoundedMemoryChunkStore {
    * Called immediately after a chunk range is confirmed uploaded to Google Drive.
    */
   public evictBefore(minPieceIndex: number): number {
+    this.minActivePieceIndex = Math.max(this.minActivePieceIndex, minPieceIndex);
     let evicted = 0;
     for (const key of this.chunks.keys()) {
       if (key < minPieceIndex) {

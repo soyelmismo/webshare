@@ -2310,6 +2310,70 @@ export class StreamTransferManager {
       } catch {}
     }
 
+    // Inform bounded memory store of the minimum active piece so active pieces are never evicted
+    if (torrent.store && typeof (torrent.store as any).evictBefore === "function") {
+      const fileOffset = (targetFile as any).offset || 0;
+      const currentStartPiece = Math.floor((fileOffset + start) / torrent.pieceLength);
+      (torrent.store as any).evictBefore(currentStartPiece);
+    }
+
+    const totalNeeded = end - start;
+    const collectedChunks: Buffer[] = [];
+    let currentByteOffset = start;
+    let attempts = 0;
+
+    while (currentByteOffset < end && attempts < 10) {
+      if (signal?.aborted) {
+        throw new Error("Transmisión cancelada o pausada.");
+      }
+      attempts++;
+
+      const subBuf = await this.readTorrentStreamSegment(
+        torrent,
+        targetFile,
+        currentByteOffset,
+        end,
+        signal
+      );
+
+      if (subBuf.length > 0) {
+        collectedChunks.push(subBuf);
+        currentByteOffset += subBuf.length;
+      } else {
+        await new Promise((r) => setTimeout(r, 400));
+      }
+    }
+
+    const finalBuf = Buffer.concat(collectedChunks);
+    if (finalBuf.length < totalNeeded) {
+      throw new Error(
+        `Segmento incompleto descargado del torrent (${finalBuf.length} B recibidos de ${totalNeeded} B esperados). Verifica que el torrent tenga peers activos.`
+      );
+    }
+    return finalBuf;
+  }
+
+  /**
+   * Reads a single contiguous slice segment from WebTorrent file read stream.
+   */
+  private readTorrentStreamSegment(
+    torrent: any,
+    targetFile: any,
+    start: number,
+    end: number,
+    signal?: AbortSignal
+  ): Promise<Buffer> {
+    if (torrent.pieceLength && typeof torrent.critical === "function") {
+      const fileOffset = (targetFile as any).offset || 0;
+      const globalStart = fileOffset + start;
+      const globalEnd = fileOffset + end - 1;
+      const startPiece = Math.floor(globalStart / torrent.pieceLength);
+      const endPiece = Math.floor(globalEnd / torrent.pieceLength);
+      try {
+        torrent.critical(startPiece, endPiece);
+      } catch {}
+    }
+
     return new Promise((resolve, reject) => {
       const stream = targetFile.createReadStream({ start, end: end - 1 });
       const chunks: Buffer[] = [];
@@ -2357,23 +2421,7 @@ export class StreamTransferManager {
           signal.removeEventListener("abort", onAbort);
         }
         const resultBuf = Buffer.concat(chunks);
-        chunks.length = 0; // release chunk array buffers immediately
-
-        // Edge device RAM optimization: Evict pieces behind this range
-        if (torrent.store) {
-          const fileOffset = (targetFile as any).offset || 0;
-          const currentStartPiece = Math.floor((fileOffset + start) / torrent.pieceLength);
-          if (typeof (torrent.store as any).evictBefore === "function") {
-            (torrent.store as any).evictBefore(currentStartPiece);
-          } else if (Array.isArray((torrent.store as any).chunks)) {
-            for (let p = 0; p < currentStartPiece; p++) {
-              if ((torrent.store as any).chunks[p] !== undefined && (torrent.store as any).chunks[p] !== null) {
-                (torrent.store as any).chunks[p] = null;
-              }
-            }
-          }
-        }
-
+        chunks.length = 0;
         resolve(resultBuf);
       });
       stream.on("error", (err: any) => {

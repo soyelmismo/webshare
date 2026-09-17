@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {
   CloudLightning,
   Zap,
@@ -13,6 +13,9 @@ import {
   CheckCircle2,
   Loader2,
   ChevronDown,
+  ChevronRight,
+  Package,
+  FolderArchive,
   Search,
   Filter,
   Upload,
@@ -40,6 +43,197 @@ import { StoredDriveSession, loadDriveSession, setActiveAccount, onDriveSessionC
 import { googleSignIn } from "../utils/firebaseAuth";
 import { getQueueConfig, updateQueueConfig, reorderStreamQueue } from "../utils/streamApi";
 
+export interface SubfolderGroup {
+  folderPath: string;
+  folderName: string;
+  jobs: UnifiedJobItem[];
+  totalBytes: number;
+  downloadedBytes: number;
+  progressPercent: number;
+  completedCount: number;
+}
+
+export interface TorrentPackageGroup {
+  id: string;
+  name: string;
+  isBatch: boolean;
+  jobs: UnifiedJobItem[];
+  subfolders: SubfolderGroup[];
+  totalBytes: number;
+  downloadedBytes: number;
+  progressPercent: number;
+  activeCount: number;
+  queuedCount: number;
+  completedCount: number;
+  pausedCount: number;
+  failedCount: number;
+  totalSpeedMBs: number;
+  destination: "drive" | "server" | "both";
+}
+
+function formatBytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return "0 B";
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function groupJobsIntoPackages(jobs: UnifiedJobItem[]): TorrentPackageGroup[] {
+  const rootDirCounts = new Map<string, number>();
+  for (const j of jobs) {
+    if (j.filePath && j.filePath.includes("/")) {
+      const root = j.filePath.split("/")[0];
+      rootDirCounts.set(root, (rootDirCounts.get(root) || 0) + 1);
+    }
+  }
+
+  const rawGroups = new Map<string, { key: string; jobs: UnifiedJobItem[]; isBatch: boolean; defaultName: string }>();
+
+  for (const job of jobs) {
+    let groupKey: string;
+    let isBatch = false;
+    let defaultName = job.filename;
+
+    if (job.batchId) {
+      groupKey = `batch_${job.batchId}`;
+      isBatch = true;
+    } else if (job.totalInBatch && job.totalInBatch > 1 && job.sourceUrl) {
+      groupKey = `url_${job.sourceUrl}`;
+      isBatch = true;
+    } else if (job.filePath && job.filePath.includes("/")) {
+      const root = job.filePath.split("/")[0];
+      if ((rootDirCounts.get(root) || 0) > 1) {
+        groupKey = `root_${root}`;
+        isBatch = true;
+        defaultName = root;
+      } else {
+        groupKey = `standalone_${job.id}`;
+      }
+    } else {
+      groupKey = `standalone_${job.id}`;
+    }
+
+    if (!rawGroups.has(groupKey)) {
+      rawGroups.set(groupKey, { key: groupKey, jobs: [], isBatch, defaultName });
+    }
+    rawGroups.get(groupKey)!.jobs.push(job);
+  }
+
+  const result: TorrentPackageGroup[] = [];
+
+  for (const [groupKey, groupData] of rawGroups.entries()) {
+    const pkgJobs = groupData.jobs;
+    const isMultiFile = groupData.isBatch || pkgJobs.length > 1;
+
+    let packageName = groupData.defaultName;
+    if (isMultiFile) {
+      const firstWithPath = pkgJobs.find((j) => j.filePath && j.filePath.includes("/"));
+      if (firstWithPath && firstWithPath.filePath) {
+        packageName = firstWithPath.filePath.split("/")[0];
+      } else if (pkgJobs[0].rawStreamTask?.sourceUrl) {
+        const sUrl = pkgJobs[0].rawStreamTask.sourceUrl;
+        if (sUrl.startsWith("magnet:")) {
+          const match = sUrl.match(/dn=([^&]+)/i);
+          if (match) {
+            try {
+              packageName = decodeURIComponent(match[1].replace(/\+/g, " "));
+            } catch {}
+          }
+        }
+      }
+    }
+
+    const subfolderMap = new Map<string, UnifiedJobItem[]>();
+
+    for (const j of pkgJobs) {
+      let subfolderPath = "";
+      if (j.filePath && j.filePath.includes("/")) {
+        const parts = j.filePath.split("/");
+        if (parts.length > 2) {
+          subfolderPath = parts.slice(1, -1).join("/");
+        } else {
+          subfolderPath = "";
+        }
+      }
+
+      if (!subfolderMap.has(subfolderPath)) {
+        subfolderMap.set(subfolderPath, []);
+      }
+      subfolderMap.get(subfolderPath)!.push(j);
+    }
+
+    const subfolderGroups: SubfolderGroup[] = [];
+    const sortedSubKeys = Array.from(subfolderMap.keys()).sort((a, b) => {
+      if (a === "") return -1;
+      if (b === "") return 1;
+      return a.localeCompare(b);
+    });
+
+    for (const sPath of sortedSubKeys) {
+      const sJobs = subfolderMap.get(sPath)!;
+      const sTotalBytes = sJobs.reduce((acc, j) => acc + (j.totalBytes || 0), 0);
+      const sDownloaded = sJobs.reduce((acc, j) => acc + (j.downloadedBytes || 0), 0);
+      const sCompleted = sJobs.filter((j) => j.status === "completed").length;
+      const sProgress = sTotalBytes > 0 ? Math.round((sDownloaded / sTotalBytes) * 100) : 0;
+
+      subfolderGroups.push({
+        folderPath: sPath,
+        folderName: sPath || (sortedSubKeys.length > 1 ? "Archivos en la raíz" : ""),
+        jobs: sJobs,
+        totalBytes: sTotalBytes,
+        downloadedBytes: sDownloaded,
+        progressPercent: sProgress,
+        completedCount: sCompleted,
+      });
+    }
+
+    const totalBytes = pkgJobs.reduce((acc, j) => acc + (j.totalBytes || 0), 0);
+    const downloadedBytes = pkgJobs.reduce((acc, j) => acc + (j.downloadedBytes || 0), 0);
+    const progressPercent = totalBytes > 0 ? Math.round((downloadedBytes / totalBytes) * 100) : 0;
+    const activeCount = pkgJobs.filter(
+      (j) => j.status === "streaming" || j.status === "downloading" || j.status === "starting"
+    ).length;
+    const queuedCount = pkgJobs.filter((j) => j.status === "queued").length;
+    const completedCount = pkgJobs.filter((j) => j.status === "completed").length;
+    const pausedCount = pkgJobs.filter((j) => j.status === "paused").length;
+    const failedCount = pkgJobs.filter((j) => j.status === "failed" || j.status === "error").length;
+
+    let totalSpeedMBs = 0;
+    for (const j of pkgJobs) {
+      if (j.status === "streaming" || j.status === "downloading") {
+        if (j.rawStreamTask?.torrentSpeedMBs) {
+          totalSpeedMBs += j.rawStreamTask.torrentSpeedMBs;
+        } else if (j.rawStreamTask?.speedMBs) {
+          totalSpeedMBs += j.rawStreamTask.speedMBs;
+        } else if (j.downloadSpeedStr) {
+          const m = j.downloadSpeedStr.match(/([\d.]+)\s*MB\/s/i);
+          if (m) totalSpeedMBs += parseFloat(m[1]);
+        }
+      }
+    }
+
+    result.push({
+      id: groupKey,
+      name: packageName,
+      isBatch: isMultiFile,
+      jobs: pkgJobs,
+      subfolders: subfolderGroups,
+      totalBytes,
+      downloadedBytes,
+      progressPercent,
+      activeCount,
+      queuedCount,
+      completedCount,
+      pausedCount,
+      failedCount,
+      totalSpeedMBs,
+      destination: pkgJobs[0]?.destination || "drive",
+    });
+  }
+
+  return result;
+}
+
 export interface UnifiedJobItem {
   id: string;
   filename: string;
@@ -48,6 +242,7 @@ export interface UnifiedJobItem {
   status: "starting" | "streaming" | "downloading" | "paused" | "completed" | "failed" | "error" | "cancelled" | "queued";
   queueIndex?: number;
   totalInBatch?: number;
+  batchId?: string;
   progressPercent: number;
   downloadSpeedStr: string;
   uploadSpeedStr: string;
@@ -154,6 +349,11 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
   const [maxConcurrentDownloads, setMaxConcurrentDownloads] = useState<number>(2);
   const [isUpdatingQueue, setIsUpdatingQueue] = useState<boolean>(false);
 
+  // Grouping & Collapsible Hierarchy State
+  const [groupingMode, setGroupingMode] = useState<"grouped" | "flat">("grouped");
+  const [collapsedPackageIds, setCollapsedPackageIds] = useState<Set<string>>(() => new Set());
+  const [collapsedFolderKeys, setCollapsedFolderKeys] = useState<Set<string>>(() => new Set());
+
   useEffect(() => {
     getQueueConfig()
       .then((cfg) => {
@@ -212,6 +412,7 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
             : "starting",
         queueIndex: st.queueIndex,
         totalInBatch: st.totalInBatch,
+        batchId: st.batchId,
         progressPercent: Math.round(st.progressPercent || 0),
         downloadSpeedStr:
           st.sourceType === "torrent" && typeof st.torrentSpeedMBs === "number" && st.torrentSpeedMBs > 0
@@ -677,6 +878,309 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
 
   const selectedJob = unifiedJobs.find((j) => j.id === selectedJobId) || filteredJobs[0];
 
+  const torrentPackages = useMemo(() => {
+    return groupJobsIntoPackages(filteredJobs);
+  }, [filteredJobs]);
+
+  const togglePackageCollapse = (pkgId: string) => {
+    setCollapsedPackageIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(pkgId)) {
+        next.delete(pkgId);
+      } else {
+        next.add(pkgId);
+      }
+      return next;
+    });
+  };
+
+  const toggleFolderCollapse = (folderKey: string) => {
+    setCollapsedFolderKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(folderKey)) {
+        next.delete(folderKey);
+      } else {
+        next.add(folderKey);
+      }
+      return next;
+    });
+  };
+
+  const handleToggleAll = (collapse: boolean) => {
+    if (collapse) {
+      const allPkgIds = new Set<string>();
+      const allFolderKeys = new Set<string>();
+      for (const pkg of torrentPackages) {
+        if (pkg.isBatch) {
+          allPkgIds.add(pkg.id);
+          for (const sub of pkg.subfolders) {
+            if (sub.folderPath) {
+              allFolderKeys.add(`${pkg.id}:${sub.folderPath}`);
+            }
+          }
+        }
+      }
+      setCollapsedPackageIds(allPkgIds);
+      setCollapsedFolderKeys(allFolderKeys);
+    } else {
+      setCollapsedPackageIds(new Set());
+      setCollapsedFolderKeys(new Set());
+    }
+  };
+
+  const handlePausePackage = async (packageJobs: UnifiedJobItem[]) => {
+    const activeJobs = packageJobs.filter(
+      (j) => j.status === "streaming" || j.status === "downloading" || j.status === "queued" || j.status === "starting"
+    );
+    if (activeJobs.length === 0) return;
+    await Promise.allSettled(
+      activeJobs.map((j) => {
+        if (j.engineType === "stream") {
+          return fetch("/api/stream/pause", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ taskId: j.id, accessToken: activeToken }),
+          });
+        } else {
+          return fetch(`/api/sequential/jobs/${j.id}/pause`, { method: "POST" });
+        }
+      })
+    );
+    await fetchAllJobs();
+  };
+
+  const handleResumePackage = async (packageJobs: UnifiedJobItem[]) => {
+    const pausedJobs = packageJobs.filter((j) => j.status === "paused");
+    if (pausedJobs.length === 0) return;
+    await Promise.allSettled(
+      pausedJobs.map((j) => {
+        if (j.engineType === "stream") {
+          return fetch("/api/stream/resume", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ taskId: j.id, accessToken: activeToken }),
+          });
+        } else {
+          return fetch(`/api/sequential/jobs/${j.id}/resume`, { method: "POST" });
+        }
+      })
+    );
+    await fetchAllJobs();
+  };
+
+  const handleDeletePackage = async (packageJobs: UnifiedJobItem[], packageName: string) => {
+    if (!window.confirm(`¿Estás seguro de cancelar y eliminar las ${packageJobs.length} tareas del paquete "${packageName}"?`)) {
+      return;
+    }
+    for (const j of packageJobs) {
+      removeJobFromCacheAndState(j.id);
+    }
+    await Promise.allSettled(
+      packageJobs.map((j) => {
+        if (j.engineType === "sequential") {
+          return fetch(`/api/sequential/jobs/${j.id}`, { method: "DELETE" });
+        } else {
+          return fetch("/api/stream/cancel", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ taskId: j.id, accessToken: activeToken }),
+          });
+        }
+      })
+    );
+    await fetchAllJobs();
+  };
+
+  const renderJobRow = (job: UnifiedJobItem, indentLevel: 0 | 1 | 2 = 0) => {
+    const isSelected = selectedJob?.id === job.id;
+
+    return (
+      <tr
+        key={job.id}
+        onClick={() => {
+          setSelectedJobId(job.id);
+          if (onJobSelect) onJobSelect(job);
+        }}
+        className={`hover:bg-[#161a1f] cursor-pointer transition-colors ${
+          isSelected ? "bg-[#1f242c]/90 font-semibold border-l-2 border-l-[#10b981]" : ""
+        }`}
+      >
+        {/* Engine */}
+        <td className={`p-3 ${indentLevel === 1 ? "pl-5" : indentLevel === 2 ? "pl-9" : ""}`}>
+          {job.engineType === "stream" ? (
+            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-[#064e3b] text-[#34d399] border border-[#059669]/50 flex items-center gap-1 w-fit">
+              <CloudLightning className="w-3 h-3 text-[#10b981]" />
+              Stream Zero-Disk
+            </span>
+          ) : (
+            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-[#1e3a8a]/30 text-[#60a5fa] border border-[#3b82f6]/40 flex items-center gap-1 w-fit">
+              <Zap className="w-3 h-3 text-[#3b82f6]" />
+              Secuencial
+            </span>
+          )}
+        </td>
+
+        {/* Filename */}
+        <td className="p-3 text-[#f3f4f6] max-w-xs truncate" title={job.filePath || job.filename}>
+          <div className="flex items-center gap-1.5 truncate">
+            {indentLevel > 0 && <span className="text-[#3b424d] font-mono select-none">└─</span>}
+            <span className="truncate font-medium">{job.filename}</span>
+          </div>
+          {indentLevel === 0 && job.filePath && job.filePath !== job.filename && job.filePath.includes("/") && (
+            <div className="text-[10px] text-[#9ca3af] font-mono truncate flex items-center gap-1 mt-0.5">
+              <Folder className="w-2.5 h-2.5 text-[#10b981] shrink-0" />
+              <span className="truncate">{job.filePath.substring(0, job.filePath.lastIndexOf("/"))}</span>
+            </div>
+          )}
+        </td>
+
+        {/* Status */}
+        <td className="p-3">
+          <span
+            className={`px-1.5 py-0.5 rounded text-[10px] uppercase font-bold flex items-center gap-1 w-fit ${
+              job.status === "completed"
+                ? "text-[#34d399]"
+                : job.status === "streaming" || job.status === "downloading"
+                ? "text-[#60a5fa] animate-pulse"
+                : job.status === "queued"
+                ? "bg-[#78350f]/30 text-[#f59e0b] border border-[#f59e0b]/40 font-semibold"
+                : job.status === "paused"
+                ? "text-[#f59e0b]"
+                : job.status === "failed" || job.status === "error"
+                ? "text-[#f87171]"
+                : "text-[#9ca3af]"
+            }`}
+          >
+            {job.status === "queued" ? (
+              <>
+                <ListOrdered className="w-3 h-3 text-[#f59e0b]" />
+                <span>Cola #{job.queueIndex || 1}</span>
+              </>
+            ) : (
+              job.status
+            )}
+          </span>
+        </td>
+
+        {/* Progress */}
+        <td className="p-3 text-[#f3f4f6]">
+          <div className="flex items-center gap-2">
+            <div className="w-16 bg-[#14171a] h-2 rounded-full overflow-hidden border border-[#22272e]">
+              <div
+                style={{ width: `${job.progressPercent}%` }}
+                className={`h-full ${
+                  job.status === "completed"
+                    ? "bg-[#10b981]"
+                    : job.status === "failed"
+                    ? "bg-[#ef4444]"
+                    : "bg-[#10b981]"
+                }`}
+              />
+            </div>
+            <span className="text-[11px]">{job.progressPercent}%</span>
+          </div>
+        </td>
+
+        {/* Speed */}
+        <td className="p-3 text-[#9ca3af]">
+          <div className="font-mono text-xs text-[#f3f4f6]">{job.downloadSpeedStr}</div>
+          {job.peers !== undefined && job.sourceType === "torrent" && (
+            <div className="text-[10px] text-[#10b981] font-mono">
+              {job.peers} peers
+            </div>
+          )}
+        </td>
+
+        {/* Destination */}
+        <td className="p-3 text-[#9ca3af]">
+          {job.destination === "drive" ? "Drive 📁" : "Servidor 🖥️"}
+        </td>
+
+        {/* Actions */}
+        <td className="p-3 text-right" onClick={(e) => e.stopPropagation()}>
+          <div className="flex items-center justify-end gap-1">
+            {job.status === "queued" && job.engineType === "stream" && (
+              <div className="flex items-center gap-0.5 mr-1 bg-[#14171a] p-0.5 rounded border border-[#22272e]">
+                <button
+                  onClick={() => handleReorderQueue(job.id, "top")}
+                  disabled={actionJobId === job.id || job.queueIndex === 1}
+                  className="p-1 rounded text-[#9ca3af] hover:text-[#34d399] hover:bg-[#1f242c] disabled:opacity-30 transition-colors cursor-pointer"
+                  title="Mover al inicio de la cola (Top)"
+                >
+                  <ChevronsUp className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  onClick={() => handleReorderQueue(job.id, "up")}
+                  disabled={actionJobId === job.id || job.queueIndex === 1}
+                  className="p-1 rounded text-[#9ca3af] hover:text-[#34d399] hover:bg-[#1f242c] disabled:opacity-30 transition-colors cursor-pointer"
+                  title="Subir prioridad (▲)"
+                >
+                  <ArrowUp className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  onClick={() => handleReorderQueue(job.id, "down")}
+                  disabled={actionJobId === job.id}
+                  className="p-1 rounded text-[#9ca3af] hover:text-[#34d399] hover:bg-[#1f242c] disabled:opacity-30 transition-colors cursor-pointer"
+                  title="Bajar prioridad (▼)"
+                >
+                  <ArrowDown className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  onClick={() => handleReorderQueue(job.id, "bottom")}
+                  disabled={actionJobId === job.id}
+                  className="p-1 rounded text-[#9ca3af] hover:text-[#34d399] hover:bg-[#1f242c] disabled:opacity-30 transition-colors cursor-pointer"
+                  title="Mover al final de la cola (Bottom)"
+                >
+                  <ChevronsDown className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
+            {(job.status === "streaming" || job.status === "downloading") && (
+              <button
+                onClick={() => handlePauseJob(job)}
+                className="p-1 rounded text-[#f59e0b] hover:bg-[#78350f]/30 transition-colors"
+                title="Pausar"
+              >
+                <Pause className="w-3.5 h-3.5" />
+              </button>
+            )}
+
+            {job.status === "paused" && (
+              <button
+                onClick={() => handleResumeJob(job)}
+                className="p-1 rounded text-[#34d399] hover:bg-[#064e3b]/30 transition-colors"
+                title="Reanudar"
+              >
+                <Play className="w-3.5 h-3.5 fill-current" />
+              </button>
+            )}
+
+            {job.webViewLink && (
+              <a
+                href={job.webViewLink}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="p-1 rounded text-[#10b981] hover:bg-[#161a1f] transition-colors"
+                title="Ver en Drive"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+            )}
+
+            <button
+              onClick={() => handleDeleteJob(job)}
+              className="p-1 rounded text-[#9ca3af] hover:text-[#f87171] hover:bg-[#7f1d1d]/30 transition-colors"
+              title="Eliminar"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </td>
+      </tr>
+    );
+  };
+
   // Helper stats
   const streamingCount = unifiedJobs.filter(
     (j) => j.status === "streaming" || j.status === "downloading" || j.status === "starting"
@@ -876,12 +1380,12 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
       )}
 
       {/* Filters & Search Bar */}
-      <div className="bg-[#14171a] border border-[#22272e] rounded-xl p-3 flex flex-col sm:flex-row items-center justify-between gap-3">
+      <div className="bg-[#14171a] border border-[#22272e] rounded-xl p-3 flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3">
         {/* Sub-filter tabs */}
-        <div className="flex items-center gap-1 bg-[#101317] p-1 rounded-lg border border-[#22272e] w-full sm:w-auto">
+        <div className="flex items-center gap-1 bg-[#101317] p-1 rounded-lg border border-[#22272e] overflow-x-auto">
           <button
             onClick={() => setFilterType("all")}
-            className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer ${
+            className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer shrink-0 ${
               filterType === "all"
                 ? "bg-[#1f242c] text-[#f3f4f6] border border-[#3b424d]"
                 : "text-[#9ca3af] hover:text-[#f3f4f6]"
@@ -891,7 +1395,7 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
           </button>
           <button
             onClick={() => setFilterType("active")}
-            className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer ${
+            className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer shrink-0 ${
               filterType === "active"
                 ? "bg-[#1f242c] text-[#f3f4f6] border border-[#3b424d]"
                 : "text-[#9ca3af] hover:text-[#f3f4f6]"
@@ -901,7 +1405,7 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
           </button>
           <button
             onClick={() => setFilterType("stream")}
-            className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1 ${
+            className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1 shrink-0 ${
               filterType === "stream"
                 ? "bg-[#1f242c] text-[#10b981] border border-[#3b424d]"
                 : "text-[#9ca3af] hover:text-[#f3f4f6]"
@@ -912,7 +1416,7 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
           </button>
           <button
             onClick={() => setFilterType("sequential")}
-            className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1 ${
+            className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1 shrink-0 ${
               filterType === "sequential"
                 ? "bg-[#1f242c] text-[#3b82f6] border border-[#3b424d]"
                 : "text-[#9ca3af] hover:text-[#f3f4f6]"
@@ -923,7 +1427,7 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
           </button>
           <button
             onClick={() => setFilterType("completed")}
-            className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer ${
+            className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer shrink-0 ${
               filterType === "completed"
                 ? "bg-[#1f242c] text-[#34d399] border border-[#3b424d]"
                 : "text-[#9ca3af] hover:text-[#f3f4f6]"
@@ -933,16 +1437,69 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
           </button>
         </div>
 
-        {/* Search input */}
-        <div className="relative w-full sm:w-64">
-          <Search className="w-3.5 h-3.5 text-[#9ca3af] absolute left-2.5 top-1/2 -translate-y-1/2" />
-          <input
-            type="text"
-            placeholder="Buscar por nombre o URL..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full pl-8 pr-3 py-1.5 rounded-lg bg-[#101317] border border-[#22272e] text-xs font-mono text-[#f3f4f6] placeholder-[#6b7280] outline-none focus:border-[#10b981]"
-          />
+        {/* Right side controls: Grouping Mode, Collapse/Expand All & Search */}
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* View Mode Toggle: Grouped vs Flat */}
+          <div className="flex items-center gap-1 bg-[#101317] p-1 rounded-lg border border-[#22272e]">
+            <button
+              onClick={() => setGroupingMode("grouped")}
+              className={`px-2.5 py-1 rounded text-xs font-semibold transition-colors flex items-center gap-1.5 cursor-pointer ${
+                groupingMode === "grouped"
+                  ? "bg-[#1f242c] text-[#10b981] border border-[#3b424d]"
+                  : "text-[#9ca3af] hover:text-[#f3f4f6]"
+              }`}
+              title="Agrupar archivos por Torrent y Carpetas colapsables"
+            >
+              <Package className="w-3.5 h-3.5 text-[#10b981]" />
+              <span>Agrupado</span>
+            </button>
+            <button
+              onClick={() => setGroupingMode("flat")}
+              className={`px-2.5 py-1 rounded text-xs font-semibold transition-colors flex items-center gap-1.5 cursor-pointer ${
+                groupingMode === "flat"
+                  ? "bg-[#1f242c] text-[#60a5fa] border border-[#3b424d]"
+                  : "text-[#9ca3af] hover:text-[#f3f4f6]"
+              }`}
+              title="Vista plana tradicional de lista continua"
+            >
+              <ListOrdered className="w-3.5 h-3.5" />
+              <span>Plano</span>
+            </button>
+          </div>
+
+          {/* Quick Collapse / Expand All (Only in Grouped mode) */}
+          {groupingMode === "grouped" && (
+            <div className="flex items-center gap-1 bg-[#101317] p-1 rounded-lg border border-[#22272e]">
+              <button
+                onClick={() => handleToggleAll(true)}
+                className="px-2 py-1 rounded text-xs font-mono text-[#9ca3af] hover:text-[#f3f4f6] hover:bg-[#1f242c] transition-colors cursor-pointer flex items-center gap-1"
+                title="Contraer todos los paquetes y carpetas para ahorrar espacio vertical"
+              >
+                <ChevronsDown className="w-3.5 h-3.5 text-[#10b981]" />
+                <span className="hidden sm:inline">Contraer Todo</span>
+              </button>
+              <button
+                onClick={() => handleToggleAll(false)}
+                className="px-2 py-1 rounded text-xs font-mono text-[#9ca3af] hover:text-[#f3f4f6] hover:bg-[#1f242c] transition-colors cursor-pointer flex items-center gap-1"
+                title="Expandir todos los paquetes y carpetas"
+              >
+                <ChevronsUp className="w-3.5 h-3.5 text-[#10b981]" />
+                <span className="hidden sm:inline">Expandir Todo</span>
+              </button>
+            </div>
+          )}
+
+          {/* Search input */}
+          <div className="relative w-full sm:w-56">
+            <Search className="w-3.5 h-3.5 text-[#9ca3af] absolute left-2.5 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              placeholder="Buscar archivo o carpeta..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full pl-8 pr-3 py-1.5 rounded-lg bg-[#101317] border border-[#22272e] text-xs font-mono text-[#f3f4f6] placeholder-[#6b7280] outline-none focus:border-[#10b981]"
+            />
+          </div>
         </div>
       </div>
 
@@ -1220,192 +1777,275 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#22272e] bg-[#101317]">
-                  {filteredJobs.map((job) => {
-                    const isSelected = selectedJob?.id === job.id;
+                  {groupingMode === "flat" ? (
+                    filteredJobs.map((job) => renderJobRow(job, 0))
+                  ) : (
+                    torrentPackages.map((pkg) => {
+                      if (!pkg.isBatch) {
+                        return renderJobRow(pkg.jobs[0], 0);
+                      }
 
-                    return (
-                      <tr
-                        key={job.id}
-                        onClick={() => {
-                          setSelectedJobId(job.id);
-                          if (onJobSelect) onJobSelect(job);
-                        }}
-                        className={`hover:bg-[#161a1f] cursor-pointer transition-colors ${
-                          isSelected ? "bg-[#1f242c]/90 font-semibold border-l-2 border-l-[#10b981]" : ""
-                        }`}
-                      >
-                        {/* Engine */}
-                        <td className="p-3">
-                          {job.engineType === "stream" ? (
-                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-[#064e3b] text-[#34d399] border border-[#059669]/50 flex items-center gap-1 w-fit">
-                              <CloudLightning className="w-3 h-3 text-[#10b981]" />
-                              Stream Zero-Disk
-                            </span>
-                          ) : (
-                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-[#1e3a8a]/30 text-[#60a5fa] border border-[#3b82f6]/40 flex items-center gap-1 w-fit">
-                              <Zap className="w-3 h-3 text-[#3b82f6]" />
-                              Secuencial
-                            </span>
-                          )}
-                        </td>
+                      const isPkgCollapsed = collapsedPackageIds.has(pkg.id);
 
-                        {/* Filename */}
-                        <td className="p-3 text-[#f3f4f6] max-w-xs truncate" title={job.filePath || job.filename}>
-                          <div className="truncate font-medium">{job.filename}</div>
-                          {job.filePath && job.filePath !== job.filename && job.filePath.includes("/") && (
-                            <div className="text-[10px] text-[#9ca3af] font-mono truncate flex items-center gap-1">
-                              <Folder className="w-2.5 h-2.5 text-[#10b981] shrink-0" />
-                              <span className="truncate">{job.filePath.substring(0, job.filePath.lastIndexOf("/"))}</span>
-                            </div>
-                          )}
-                        </td>
-
-                        {/* Status */}
-                        <td className="p-3">
-                          <span
-                            className={`px-1.5 py-0.5 rounded text-[10px] uppercase font-bold flex items-center gap-1 w-fit ${
-                              job.status === "completed"
-                                ? "text-[#34d399]"
-                                : job.status === "streaming" || job.status === "downloading"
-                                ? "text-[#60a5fa] animate-pulse"
-                                : job.status === "queued"
-                                ? "bg-[#78350f]/30 text-[#f59e0b] border border-[#f59e0b]/40 font-semibold"
-                                : job.status === "paused"
-                                ? "text-[#f59e0b]"
-                                : job.status === "failed" || job.status === "error"
-                                ? "text-[#f87171]"
-                                : "text-[#9ca3af]"
-                            }`}
+                      return (
+                        <React.Fragment key={pkg.id}>
+                          {/* Package Summary Header Row */}
+                          <tr
+                            onClick={() => {
+                              togglePackageCollapse(pkg.id);
+                              if (!selectedJob || !pkg.jobs.some((j) => j.id === selectedJob.id)) {
+                                const activeOrFirst =
+                                  pkg.jobs.find(
+                                    (j) =>
+                                      j.status === "streaming" ||
+                                      j.status === "downloading" ||
+                                      j.status === "starting" ||
+                                      j.status === "queued"
+                                  ) || pkg.jobs[0];
+                                if (activeOrFirst) {
+                                  setSelectedJobId(activeOrFirst.id);
+                                  if (onJobSelect) onJobSelect(activeOrFirst);
+                                }
+                              }
+                            }}
+                            className="bg-[#181d24] hover:bg-[#1f2630] border-y border-[#10b981]/30 cursor-pointer font-sans select-none transition-colors"
                           >
-                            {job.status === "queued" ? (
-                              <>
-                                <ListOrdered className="w-3 h-3 text-[#f59e0b]" />
-                                <span>Cola #{job.queueIndex || 1}</span>
-                              </>
-                            ) : (
-                              job.status
-                            )}
-                          </span>
-                        </td>
-
-                        {/* Progress */}
-                        <td className="p-3 text-[#f3f4f6]">
-                          <div className="flex items-center gap-2">
-                            <div className="w-16 bg-[#14171a] h-2 rounded-full overflow-hidden border border-[#22272e]">
-                              <div
-                                style={{ width: `${job.progressPercent}%` }}
-                                className={`h-full ${
-                                  job.status === "completed"
-                                    ? "bg-[#10b981]"
-                                    : job.status === "failed"
-                                    ? "bg-[#ef4444]"
-                                    : "bg-[#10b981]"
-                                }`}
-                              />
-                            </div>
-                            <span className="text-[11px]">{job.progressPercent}%</span>
-                          </div>
-                        </td>
-
-                        {/* Speed */}
-                        <td className="p-3 text-[#9ca3af]">
-                          <div className="font-mono text-xs text-[#f3f4f6]">{job.downloadSpeedStr}</div>
-                          {job.peers !== undefined && job.sourceType === "torrent" && (
-                            <div className="text-[10px] text-[#10b981] font-mono">
-                              {job.peers} peers
-                            </div>
-                          )}
-                        </td>
-
-                        {/* Destination */}
-                        <td className="p-3 text-[#9ca3af]">
-                          {job.destination === "drive" ? "Drive 📁" : "Servidor 🖥️"}
-                        </td>
-
-                        {/* Actions */}
-                        <td className="p-3 text-right" onClick={(e) => e.stopPropagation()}>
-                          <div className="flex items-center justify-end gap-1">
-                            {job.status === "queued" && job.engineType === "stream" && (
-                              <div className="flex items-center gap-0.5 mr-1 bg-[#14171a] p-0.5 rounded border border-[#22272e]">
+                            {/* Col 1: Chevron + Batch Badge */}
+                            <td className="p-3">
+                              <div className="flex items-center gap-1.5">
                                 <button
-                                  onClick={() => handleReorderQueue(job.id, "top")}
-                                  disabled={actionJobId === job.id || job.queueIndex === 1}
-                                  className="p-1 rounded text-[#9ca3af] hover:text-[#34d399] hover:bg-[#1f242c] disabled:opacity-30 transition-colors cursor-pointer"
-                                  title="Mover al inicio de la cola (Top)"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    togglePackageCollapse(pkg.id);
+                                  }}
+                                  className="p-1 rounded text-[#10b981] hover:bg-[#10b981]/20 transition-colors"
+                                  title={isPkgCollapsed ? "Expandir paquete" : "Contraer paquete"}
                                 >
-                                  <ChevronsUp className="w-3.5 h-3.5" />
+                                  {isPkgCollapsed ? (
+                                    <ChevronRight className="w-4 h-4" />
+                                  ) : (
+                                    <ChevronDown className="w-4 h-4" />
+                                  )}
                                 </button>
+                                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-[#10b981]/20 text-[#34d399] border border-[#10b981]/40 flex items-center gap-1">
+                                  <Package className="w-3 h-3 text-[#10b981]" />
+                                  Lote ({pkg.jobs.length})
+                                </span>
+                              </div>
+                            </td>
+
+                            {/* Col 2: Package Title + Aggregate Stats */}
+                            <td className="p-3">
+                              <div className="flex flex-col min-w-0 max-w-sm">
+                                <div className="font-bold text-sm text-[#f3f4f6] truncate flex items-center gap-1.5">
+                                  <FolderArchive className="w-4 h-4 text-[#10b981] shrink-0" />
+                                  <span className="truncate" title={pkg.name}>
+                                    {pkg.name}
+                                  </span>
+                                </div>
+                                <div className="text-[10px] font-mono text-[#9ca3af] flex items-center gap-2 mt-0.5">
+                                  <span>{pkg.jobs.length} archivos</span>
+                                  <span>•</span>
+                                  <span>{formatBytes(pkg.totalBytes)}</span>
+                                  <span>•</span>
+                                  <span className="text-[#34d399]">
+                                    {pkg.completedCount}/{pkg.jobs.length} completados
+                                  </span>
+                                </div>
+                              </div>
+                            </td>
+
+                            {/* Col 3: Status Badges */}
+                            <td className="p-3">
+                              <div className="flex flex-wrap gap-1 items-center">
+                                {pkg.activeCount > 0 && (
+                                  <span className="px-1.5 py-0.5 rounded text-[10px] uppercase font-bold bg-[#1e3a8a]/40 text-[#60a5fa] border border-[#3b82f6]/40 animate-pulse">
+                                    ⚡ {pkg.activeCount} activo{pkg.activeCount > 1 ? "s" : ""}
+                                  </span>
+                                )}
+                                {pkg.queuedCount > 0 && (
+                                  <span className="px-1.5 py-0.5 rounded text-[10px] uppercase font-bold bg-[#78350f]/30 text-[#f59e0b] border border-[#f59e0b]/40">
+                                    ⏳ {pkg.queuedCount} en cola
+                                  </span>
+                                )}
+                                {pkg.completedCount === pkg.jobs.length && pkg.jobs.length > 0 && (
+                                  <span className="px-1.5 py-0.5 rounded text-[10px] uppercase font-bold bg-[#064e3b] text-[#34d399] border border-[#059669]/60">
+                                    ✓ Completado
+                                  </span>
+                                )}
+                                {pkg.activeCount === 0 && pkg.queuedCount === 0 && pkg.pausedCount > 0 && (
+                                  <span className="px-1.5 py-0.5 rounded text-[10px] uppercase font-bold bg-[#78350f]/40 text-[#f59e0b] border border-[#f59e0b]/40">
+                                    ⏸ {pkg.pausedCount} pausados
+                                  </span>
+                                )}
+                                {pkg.failedCount > 0 && (
+                                  <span className="px-1.5 py-0.5 rounded text-[10px] uppercase font-bold bg-[#7f1d1d]/40 text-[#f87171] border border-[#ef4444]/40">
+                                    ✕ {pkg.failedCount} fallidos
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+
+                            {/* Col 4: Combined Progress Bar */}
+                            <td className="p-3">
+                              <div className="flex items-center gap-2">
+                                <div className="w-16 bg-[#101317] h-2 rounded-full overflow-hidden border border-[#22272e]">
+                                  <div
+                                    style={{ width: `${pkg.progressPercent}%` }}
+                                    className={`h-full ${
+                                      pkg.completedCount === pkg.jobs.length ? "bg-[#10b981]" : "bg-[#10b981]"
+                                    }`}
+                                  />
+                                </div>
+                                <span className="text-[11px] font-bold text-[#f3f4f6]">{pkg.progressPercent}%</span>
+                              </div>
+                              <div className="text-[9px] text-[#9ca3af] font-mono mt-0.5">
+                                {formatBytes(pkg.downloadedBytes)} / {formatBytes(pkg.totalBytes)}
+                              </div>
+                            </td>
+
+                            {/* Col 5: Total Download Speed */}
+                            <td className="p-3 text-[#9ca3af]">
+                              <div className="font-mono text-xs text-[#f3f4f6] font-bold">
+                                {pkg.totalSpeedMBs > 0 ? `${pkg.totalSpeedMBs.toFixed(1)} MB/s` : "0 MB/s"}
+                              </div>
+                            </td>
+
+                            {/* Col 6: Destination */}
+                            <td className="p-3 text-[#9ca3af]">
+                              {pkg.destination === "drive" ? "Drive 📁" : "Servidor 🖥️"}
+                            </td>
+
+                            {/* Col 7: Batch Actions */}
+                            <td className="p-3 text-right" onClick={(e) => e.stopPropagation()}>
+                              <div className="flex items-center justify-end gap-1.5">
+                                {pkg.activeCount > 0 ? (
+                                  <button
+                                    onClick={() => handlePausePackage(pkg.jobs)}
+                                    className="flex items-center gap-1 px-2 py-1 rounded bg-[#78350f]/30 text-[#f59e0b] border border-[#f59e0b]/40 hover:bg-[#78350f]/60 text-[11px] font-semibold cursor-pointer transition-colors"
+                                    title="Pausar todas las descargas activas de este lote"
+                                  >
+                                    <Pause className="w-3 h-3" />
+                                    <span>Pausar Lote</span>
+                                  </button>
+                                ) : pkg.pausedCount > 0 ? (
+                                  <button
+                                    onClick={() => handleResumePackage(pkg.jobs)}
+                                    className="flex items-center gap-1 px-2 py-1 rounded bg-[#064e3b]/40 text-[#34d399] border border-[#059669]/60 hover:bg-[#064e3b]/70 text-[11px] font-semibold cursor-pointer transition-colors"
+                                    title="Reanudar todas las descargas de este lote"
+                                  >
+                                    <Play className="w-3 h-3 fill-current" />
+                                    <span>Reanudar</span>
+                                  </button>
+                                ) : null}
+
                                 <button
-                                  onClick={() => handleReorderQueue(job.id, "up")}
-                                  disabled={actionJobId === job.id || job.queueIndex === 1}
-                                  className="p-1 rounded text-[#9ca3af] hover:text-[#34d399] hover:bg-[#1f242c] disabled:opacity-30 transition-colors cursor-pointer"
-                                  title="Subir prioridad (▲)"
+                                  onClick={() => handleDeletePackage(pkg.jobs, pkg.name)}
+                                  className="p-1.5 rounded bg-[#7f1d1d]/20 text-[#f87171] border border-[#ef4444]/30 hover:bg-[#7f1d1d]/50 cursor-pointer transition-colors"
+                                  title="Eliminar todo este lote"
                                 >
-                                  <ArrowUp className="w-3.5 h-3.5" />
+                                  <Trash2 className="w-3.5 h-3.5" />
                                 </button>
+
                                 <button
-                                  onClick={() => handleReorderQueue(job.id, "down")}
-                                  disabled={actionJobId === job.id}
-                                  className="p-1 rounded text-[#9ca3af] hover:text-[#34d399] hover:bg-[#1f242c] disabled:opacity-30 transition-colors cursor-pointer"
-                                  title="Bajar prioridad (▼)"
+                                  onClick={() => togglePackageCollapse(pkg.id)}
+                                  className="p-1.5 rounded bg-[#101317] text-[#9ca3af] hover:text-[#f3f4f6] border border-[#22272e] cursor-pointer"
+                                  title={isPkgCollapsed ? "Expandir lote" : "Contraer lote"}
                                 >
-                                  <ArrowDown className="w-3.5 h-3.5" />
-                                </button>
-                                <button
-                                  onClick={() => handleReorderQueue(job.id, "bottom")}
-                                  disabled={actionJobId === job.id}
-                                  className="p-1 rounded text-[#9ca3af] hover:text-[#34d399] hover:bg-[#1f242c] disabled:opacity-30 transition-colors cursor-pointer"
-                                  title="Mover al final de la cola (Bottom)"
-                                >
-                                  <ChevronsDown className="w-3.5 h-3.5" />
+                                  {isPkgCollapsed ? (
+                                    <ChevronRight className="w-3.5 h-3.5" />
+                                  ) : (
+                                    <ChevronDown className="w-3.5 h-3.5" />
+                                  )}
                                 </button>
                               </div>
-                            )}
+                            </td>
+                          </tr>
 
-                            {(job.status === "streaming" || job.status === "downloading") && (
-                              <button
-                                onClick={() => handlePauseJob(job)}
-                                className="p-1 rounded text-[#f59e0b] hover:bg-[#78350f]/30 transition-colors"
-                                title="Pausar"
-                              >
-                                <Pause className="w-3.5 h-3.5" />
-                              </button>
-                            )}
+                          {/* Subfolders & Nested Files when Package is expanded */}
+                          {!isPkgCollapsed &&
+                            pkg.subfolders.map((sub) => {
+                              const hasActualSubfolder = sub.folderPath !== "" || pkg.subfolders.length > 1;
+                              const folderKey = `${pkg.id}:${sub.folderPath}`;
+                              const isFolderCollapsed = collapsedFolderKeys.has(folderKey);
 
-                            {job.status === "paused" && (
-                              <button
-                                onClick={() => handleResumeJob(job)}
-                                className="p-1 rounded text-[#34d399] hover:bg-[#064e3b]/30 transition-colors"
-                                title="Reanudar"
-                              >
-                                <Play className="w-3.5 h-3.5 fill-current" />
-                              </button>
-                            )}
+                              return (
+                                <React.Fragment key={folderKey}>
+                                  {hasActualSubfolder && (
+                                    <tr
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        toggleFolderCollapse(folderKey);
+                                      }}
+                                      className="bg-[#12161b] hover:bg-[#181d24] border-b border-[#22272e] cursor-pointer font-sans select-none transition-colors"
+                                    >
+                                      <td className="p-2.5 pl-6" colSpan={2}>
+                                        <div className="flex items-center gap-2">
+                                          <button
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              toggleFolderCollapse(folderKey);
+                                            }}
+                                            className="p-0.5 rounded text-[#9ca3af] hover:text-[#f3f4f6]"
+                                          >
+                                            {isFolderCollapsed ? (
+                                              <ChevronRight className="w-3.5 h-3.5 text-[#10b981]" />
+                                            ) : (
+                                              <ChevronDown className="w-3.5 h-3.5 text-[#10b981]" />
+                                            )}
+                                          </button>
+                                          <Folder className="w-3.5 h-3.5 text-[#10b981] shrink-0" />
+                                          <span className="font-semibold text-xs text-[#f3f4f6] truncate">
+                                            {sub.folderName}
+                                          </span>
+                                          <span className="text-[10px] font-mono text-[#9ca3af]">
+                                            ({sub.jobs.length} archivo{sub.jobs.length > 1 ? "s" : ""} •{" "}
+                                            {formatBytes(sub.totalBytes)})
+                                          </span>
+                                        </div>
+                                      </td>
+                                      <td className="p-2.5">
+                                        <span className="text-[10px] font-mono text-[#9ca3af]">
+                                          {sub.completedCount}/{sub.jobs.length} listos
+                                        </span>
+                                      </td>
+                                      <td className="p-2.5" colSpan={3}>
+                                        <div className="flex items-center gap-2">
+                                          <div className="w-20 bg-[#101317] h-1.5 rounded-full overflow-hidden border border-[#22272e]">
+                                            <div
+                                              style={{ width: `${sub.progressPercent}%` }}
+                                              className="h-full bg-[#10b981]"
+                                            />
+                                          </div>
+                                          <span className="text-[10px] font-mono text-[#9ca3af]">
+                                            {sub.progressPercent}%
+                                          </span>
+                                        </div>
+                                      </td>
+                                      <td className="p-2.5 text-right">
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            toggleFolderCollapse(folderKey);
+                                          }}
+                                          className="text-[10px] font-mono text-[#9ca3af] hover:text-[#10b981] px-2 py-0.5 rounded bg-[#101317] border border-[#22272e]"
+                                        >
+                                          {isFolderCollapsed ? "Expandir" : "Contraer"}
+                                        </button>
+                                      </td>
+                                    </tr>
+                                  )}
 
-                            {job.webViewLink && (
-                              <a
-                                href={job.webViewLink}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="p-1 rounded text-[#10b981] hover:bg-[#161a1f] transition-colors"
-                                title="Ver en Drive"
-                              >
-                                <ExternalLink className="w-3.5 h-3.5" />
-                              </a>
-                            )}
-
-                            <button
-                              onClick={() => handleDeleteJob(job)}
-                              className="p-1 rounded text-[#9ca3af] hover:text-[#f87171] hover:bg-[#7f1d1d]/30 transition-colors"
-                              title="Eliminar"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
+                                  {/* Render individual files in this subfolder if not collapsed */}
+                                  {(!hasActualSubfolder || !isFolderCollapsed) &&
+                                    sub.jobs.map((job) => renderJobRow(job, hasActualSubfolder ? 2 : 1))}
+                                </React.Fragment>
+                              );
+                            })}
+                        </React.Fragment>
+                      );
+                    })
+                  )}
                 </tbody>
               </table>
             </div>

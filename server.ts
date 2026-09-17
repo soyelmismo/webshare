@@ -8,7 +8,6 @@ import crypto from "crypto";
 import { Worker } from "worker_threads";
 import { spawn, execSync, type ChildProcess } from "child_process";
 import { Readable } from "stream";
-import { createServer as createViteServer } from "vite";
 import { streamManager } from "./server/streamManager.js";
 import { sequentialChunkEngine } from "./server/sequentialEngine.js";
 import {
@@ -2059,6 +2058,7 @@ async function startStandaloneServer() {
   const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
   // Vite middleware in dev or static serving in prod
   if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",

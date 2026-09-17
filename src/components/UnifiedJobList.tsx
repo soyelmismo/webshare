@@ -933,38 +933,59 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
       (j) => j.status === "streaming" || j.status === "downloading" || j.status === "queued" || j.status === "starting"
     );
     if (activeJobs.length === 0) return;
-    await Promise.allSettled(
-      activeJobs.map((j) => {
-        if (j.engineType === "stream") {
-          return fetch("/api/stream/pause", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ taskId: j.id, accessToken: activeToken }),
-          });
-        } else {
-          return fetch(`/api/sequential/jobs/${j.id}/pause`, { method: "POST" });
-        }
-      })
-    );
+
+    const streamJobs = activeJobs.filter((j) => j.engineType === "stream");
+    const sequentialJobs = activeJobs.filter((j) => j.engineType === "sequential");
+
+    const promises: Promise<any>[] = [];
+    if (streamJobs.length > 0) {
+      const batchId = streamJobs[0].rawStreamTask?.batchId;
+      promises.push(
+        fetch("/api/stream/pause-batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            batchId: batchId || undefined,
+            taskIds: streamJobs.map((j) => j.id),
+          }),
+        })
+      );
+    }
+    for (const j of sequentialJobs) {
+      promises.push(fetch(`/api/sequential/jobs/${j.id}/pause`, { method: "POST" }));
+    }
+
+    await Promise.allSettled(promises);
     await fetchAllJobs();
   };
 
   const handleResumePackage = async (packageJobs: UnifiedJobItem[]) => {
     const pausedJobs = packageJobs.filter((j) => j.status === "paused");
     if (pausedJobs.length === 0) return;
-    await Promise.allSettled(
-      pausedJobs.map((j) => {
-        if (j.engineType === "stream") {
-          return fetch("/api/stream/resume", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ taskId: j.id, accessToken: activeToken }),
-          });
-        } else {
-          return fetch(`/api/sequential/jobs/${j.id}/resume`, { method: "POST" });
-        }
-      })
-    );
+
+    const streamJobs = pausedJobs.filter((j) => j.engineType === "stream");
+    const sequentialJobs = pausedJobs.filter((j) => j.engineType === "sequential");
+
+    const promises: Promise<any>[] = [];
+    if (streamJobs.length > 0) {
+      const batchId = streamJobs[0].rawStreamTask?.batchId;
+      promises.push(
+        fetch("/api/stream/resume-batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            batchId: batchId || undefined,
+            taskIds: streamJobs.map((j) => j.id),
+            accessToken: activeToken,
+          }),
+        })
+      );
+    }
+    for (const j of sequentialJobs) {
+      promises.push(fetch(`/api/sequential/jobs/${j.id}/resume`, { method: "POST" }));
+    }
+
+    await Promise.allSettled(promises);
     await fetchAllJobs();
   };
 
@@ -975,19 +996,30 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
     for (const j of packageJobs) {
       removeJobFromCacheAndState(j.id);
     }
-    await Promise.allSettled(
-      packageJobs.map((j) => {
-        if (j.engineType === "sequential") {
-          return fetch(`/api/sequential/jobs/${j.id}`, { method: "DELETE" });
-        } else {
-          return fetch("/api/stream/cancel", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ taskId: j.id, accessToken: activeToken }),
-          });
-        }
-      })
-    );
+
+    const streamJobs = packageJobs.filter((j) => j.engineType === "stream");
+    const sequentialJobs = packageJobs.filter((j) => j.engineType === "sequential");
+
+    const promises: Promise<any>[] = [];
+    if (streamJobs.length > 0) {
+      const batchId = streamJobs[0].rawStreamTask?.batchId;
+      promises.push(
+        fetch("/api/stream/cancel-batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            batchId: batchId || undefined,
+            taskIds: streamJobs.map((j) => j.id),
+            accessToken: activeToken,
+          }),
+        })
+      );
+    }
+    for (const j of sequentialJobs) {
+      promises.push(fetch(`/api/sequential/jobs/${j.id}`, { method: "DELETE" }));
+    }
+
+    await Promise.allSettled(promises);
     await fetchAllJobs();
   };
 

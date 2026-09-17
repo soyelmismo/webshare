@@ -189,3 +189,47 @@ export async function reorderStreamQueue(
   const data = await res.json();
   return Boolean(data.success);
 }
+
+export async function cancelBatchStreamTasks(params: {
+  batchId?: string;
+  taskIds?: string[];
+  accessToken?: string;
+}): Promise<{ success: boolean; cancelledCount: number }> {
+  const res = await fetch("/api/stream/cancel-batch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) return { success: false, cancelledCount: 0 };
+  return await res.json();
+}
+
+export async function pauseBatchStreamTasks(params: {
+  batchId?: string;
+  taskIds?: string[];
+}): Promise<boolean> {
+  const res = await fetch("/api/stream/pause-batch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) return false;
+  const data = await res.json();
+  return Boolean(data.success);
+}
+
+export async function resumeBatchStreamTasks(params: {
+  batchId?: string;
+  taskIds?: string[];
+  accessToken?: string;
+}): Promise<boolean> {
+  const res = await fetch("/api/stream/resume-batch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) return false;
+  const data = await res.json();
+  return Boolean(data.success);
+}
+

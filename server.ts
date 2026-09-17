@@ -2018,6 +2018,42 @@ app.use(express.json({ limit: "50mb" }));
     }
   });
 
+  app.post("/api/stream/cancel-batch", async (req, res) => {
+    try {
+      const { batchId, taskIds, accessToken } = req.body;
+      const target = batchId || taskIds;
+      if (!target) return res.status(400).json({ error: "Falta 'batchId' o 'taskIds'" });
+      const result = await streamManager.cancelBatchTasks(target, accessToken);
+      res.json({ success: true, ...result });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/stream/pause-batch", async (req, res) => {
+    try {
+      const { batchId, taskIds } = req.body;
+      const target = batchId || taskIds;
+      if (!target) return res.status(400).json({ error: "Falta 'batchId' o 'taskIds'" });
+      await streamManager.pauseBatchTasks(target);
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/stream/resume-batch", async (req, res) => {
+    try {
+      const { batchId, taskIds, accessToken } = req.body;
+      const target = batchId || taskIds;
+      if (!target) return res.status(400).json({ error: "Falta 'batchId' o 'taskIds'" });
+      await streamManager.resumeBatchTasks(target, accessToken);
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   app.post("/api/stream/recover", async (req, res) => {
     try {
       const { accessToken, folderId, accountEmail } = req.body;

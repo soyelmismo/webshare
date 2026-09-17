@@ -233,9 +233,18 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
         }
       }
 
-      // Overwrite/update with fresh server tasks (excluding deleted)
+      // Overwrite/update with fresh server tasks with monotonic protection
       for (const fj of freshCombined) {
         if (!deletedIds.has(fj.id)) {
+          const existing = jobsMap.get(fj.id);
+          if (existing && (existing.status === "streaming" || existing.status === "downloading" || existing.status === "starting")) {
+            // Prevent progress from bouncing backwards if a serverless instance returns a stale progress value
+            fj.downloadedBytes = Math.max(existing.downloadedBytes || 0, fj.downloadedBytes || 0);
+            fj.progressPercent = Math.max(existing.progressPercent || 0, fj.progressPercent || 0);
+            if (fj.status === "paused" && existing.status === "streaming" && fj.progressPercent < 100) {
+              fj.status = "streaming";
+            }
+          }
           jobsMap.set(fj.id, fj);
         }
       }
@@ -273,9 +282,13 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
 
   useEffect(() => {
     fetchAllJobs();
-    const timer = setInterval(fetchAllJobs, 1500);
+    const hasActiveTasks = unifiedJobs.some(
+      (j) => j.status === "streaming" || j.status === "downloading" || j.status === "starting"
+    );
+    const intervalMs = hasActiveTasks ? 800 : 3000;
+    const timer = setInterval(fetchAllJobs, intervalMs);
     return () => clearInterval(timer);
-  }, [fetchAllJobs]);
+  }, [fetchAllJobs, unifiedJobs]);
 
   // Keep local drive session updated
   useEffect(() => {

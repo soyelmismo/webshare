@@ -764,6 +764,27 @@ export class StreamTransferManager {
     (task as any).isProcessingChunk = true;
     const now = Date.now();
     try {
+      // Sync committed bytes directly from Google Drive before fetching from source.
+      // This guarantees that multiple instances/tabs stay perfectly synchronized and
+      // never download or upload redundant chunks.
+      const committed = await this.queryDriveSessionCommittedBytes(task.resumableUploadUrl, task.fileSize);
+      if (committed > task.uploadedBytes) {
+        task.uploadedBytes = committed;
+        task.uploadedBytesFormatted = formatBytes(committed);
+        task.currentChunkIndex = Math.floor(committed / task.chunkSizeBytes);
+        task.progressPercent = Math.min(99, Math.round((committed / task.fileSize) * 100));
+        this.saveTasksToDisk();
+      }
+
+      if (task.uploadedBytes >= task.fileSize) {
+        task.status = "completed";
+        task.progressPercent = 100;
+        task.speedMBs = 0;
+        task.completedAt = Date.now();
+        this.saveTasksToDisk();
+        return true;
+      }
+
       const start = task.uploadedBytes;
       const end = Math.min(start + task.chunkSizeBytes, task.fileSize);
       const chunkLen = end - start;
@@ -1594,7 +1615,7 @@ export class StreamTransferManager {
           totalChunks: manifest.totalChunks,
           progressPercent,
           speedMBs: 0,
-          status: isFinished ? "completed" : "paused",
+          status: isFinished ? "completed" : (manifest.status === "paused" ? "paused" : "streaming"),
           startedAt: manifest.startedAt,
           completedAt: isFinished ? manifest.updatedAt || Date.now() : undefined,
           finalDriveFileId: manifest.finalDriveFileId,

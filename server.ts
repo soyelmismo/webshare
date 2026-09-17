@@ -1878,13 +1878,14 @@ app.use(express.json({ limit: "50mb" }));
         tasks = await streamManager.recoverFromDriveFolder(accessToken, folderId);
       }
 
-      // Serverless progress pump: if any task is streaming and hasn't progressed recently, process next chunk
+      // Serverless progress pump: process chunks continuously for up to 5s per polling request to achieve maximum speed
       if (accessToken && tasks.length > 0) {
+        const endTime = Date.now() + 5000;
         for (const t of tasks) {
           if (t.status === "streaming") {
-            const lastChunk = (t as any).lastChunkAt || t.startedAt || 0;
-            if (Date.now() - lastChunk >= 800) {
-              await streamManager.processNextChunk(t.id, accessToken).catch(() => {});
+            while (Date.now() < endTime && t.status === "streaming") {
+              const processed = await streamManager.processNextChunk(t.id, accessToken).catch(() => false);
+              if (!processed) break;
             }
           }
         }

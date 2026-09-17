@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   CloudLightning,
   Zap,
@@ -300,7 +300,13 @@ function getCachedJobs(): UnifiedJobItem[] {
   if (typeof window === "undefined") return [];
   try {
     const raw = localStorage.getItem(LOCAL_JOBS_CACHE_KEY);
-    return raw ? JSON.parse(raw) : [];
+    const jobs: UnifiedJobItem[] = raw ? JSON.parse(raw) : [];
+    // Never allow cached speeds to be presented as active speeds
+    return jobs.map((j) => ({
+      ...j,
+      downloadSpeedStr: "0 MB/s",
+      uploadSpeedStr: "0 MB/s",
+    }));
   } catch {
     return [];
   }
@@ -309,7 +315,13 @@ function getCachedJobs(): UnifiedJobItem[] {
 function saveCachedJobs(jobs: UnifiedJobItem[]) {
   if (typeof window === "undefined") return;
   try {
-    localStorage.setItem(LOCAL_JOBS_CACHE_KEY, JSON.stringify(jobs.slice(0, 50)));
+    // Zero out speeds before caching to prevent ghost speeds upon restoration
+    const sanitized = jobs.slice(0, 50).map((j) => ({
+      ...j,
+      downloadSpeedStr: "0 MB/s",
+      uploadSpeedStr: "0 MB/s",
+    }));
+    localStorage.setItem(LOCAL_JOBS_CACHE_KEY, JSON.stringify(sanitized));
   } catch {
     // Ignore storage quota errors
   }
@@ -369,8 +381,28 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
   const activeAccountEmail = driveSession?.activeAccount?.email || driveSession?.user?.email || "";
   const activeFolderId = propFolderId || driveSession?.folder?.id || driveSession?.activeAccount?.folder?.id || "";
 
-  // Poll tasks from backend APIs every 1.5 seconds
+  const unifiedJobsRef = useRef<UnifiedJobItem[]>(unifiedJobs);
+  unifiedJobsRef.current = unifiedJobs;
+
+  const fetchSeqRef = useRef<number>(0);
+  const isFetchingRef = useRef<boolean>(false);
+
+  const [syncState, setSyncState] = useState<{
+    isStale: boolean;
+    lastSuccessfulSync: number | null;
+    lastError: string | null;
+  }>({
+    isStale: false,
+    lastSuccessfulSync: null,
+    lastError: null,
+  });
+
+  // Poll tasks from backend APIs strictly sequentially
   const fetchAllJobs = useCallback(async () => {
+    if (isFetchingRef.current) return;
+    isFetchingRef.current = true;
+    const currentSeq = ++fetchSeqRef.current;
+
     try {
       const headers: Record<string, string> = {};
       if (activeToken) {
@@ -379,22 +411,98 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
 
       // 1. Fetch Stream Tasks for active account
       const streamUrl = `/api/stream/tasks?folderId=${encodeURIComponent(activeFolderId)}&accountEmail=${encodeURIComponent(activeAccountEmail)}`;
-      const streamRes = await fetch(streamUrl, { headers }).catch(() => null);
-      let streamTasks: StreamDriveTask[] = [];
-      if (streamRes && streamRes.ok) {
-        streamTasks = await streamRes.json().catch(() => []);
-      }
+      const streamRes = await fetch(streamUrl, { headers }).catch((err) => {
+        console.warn("[UnifiedJobList] Error consultando /api/stream/tasks:", err);
+        return null;
+      });
 
       // 2. Fetch Sequential Jobs for active account
       const seqUrl = `/api/sequential/jobs?folderId=${encodeURIComponent(activeFolderId)}&accountEmail=${encodeURIComponent(activeAccountEmail)}`;
-      const seqRes = await fetch(seqUrl, { headers }).catch(() => null);
+      const seqRes = await fetch(seqUrl, { headers }).catch((err) => {
+        console.warn("[UnifiedJobList] Error consultando /api/sequential/jobs:", err);
+        return null;
+      });
+
+      // If a newer fetch was started while this one was in flight, discard this older response to prevent out-of-order race conditions
+      if (currentSeq !== fetchSeqRef.current) {
+        return;
+      }
+
+      let streamTasks: StreamDriveTask[] = [];
+      let streamOk = false;
+      if (streamRes && streamRes.ok) {
+        try {
+          const parsed = await streamRes.json();
+          if (Array.isArray(parsed)) {
+            streamTasks = parsed;
+            streamOk = true;
+          }
+        } catch (e) {
+          console.warn("[UnifiedJobList] Fallo parseando JSON de stream tasks:", e);
+        }
+      }
+
       let seqJobs: SequentialStreamJob[] = [];
+      let seqOk = false;
       if (seqRes && seqRes.ok) {
-        seqJobs = await seqRes.json().catch(() => []);
+        try {
+          const parsed = await seqRes.json();
+          if (Array.isArray(parsed)) {
+            seqJobs = parsed;
+            seqOk = true;
+          }
+        } catch (e) {
+          console.warn("[UnifiedJobList] Fallo parseando JSON de sequential jobs:", e);
+        }
+      }
+
+      if (currentSeq !== fetchSeqRef.current) {
+        return;
+      }
+
+      // Handle total failure (both endpoints down/unreachable)
+      if (!streamOk && !seqOk) {
+        const statusText = streamRes
+          ? `Servidor respondió HTTP ${streamRes.status}`
+          : "Fallo de conexión de red con el backend";
+        setSyncState((prev) => ({
+          ...prev,
+          isStale: true,
+          lastError: statusText,
+        }));
+
+        // Freeze all speeds to 0 so we never present fake download speeds during disconnection
+        setUnifiedJobs((prev) =>
+          prev.map((j) =>
+            j.status === "streaming" || j.status === "downloading"
+              ? { ...j, downloadSpeedStr: "0 MB/s", uploadSpeedStr: "0 MB/s" }
+              : j
+          )
+        );
+        return;
+      }
+
+      // Partial or full success
+      if (!streamOk || !seqOk) {
+        const partialError = !streamOk
+          ? `Error al consultar tareas de Stream (${streamRes ? `HTTP ${streamRes.status}` : "sin respuesta"})`
+          : `Error al consultar descargas secuenciales (${seqRes ? `HTTP ${seqRes.status}` : "sin respuesta"})`;
+        setSyncState((prev) => ({
+          isStale: true,
+          lastSuccessfulSync: prev.lastSuccessfulSync,
+          lastError: partialError,
+        }));
+      } else {
+        // Fully successful sync
+        setSyncState({
+          isStale: false,
+          lastSuccessfulSync: Date.now(),
+          lastError: null,
+        });
       }
 
       // 3. Normalize Stream Tasks
-      const normalizedStream: UnifiedJobItem[] = (Array.isArray(streamTasks) ? streamTasks : []).map((st) => ({
+      const normalizedStream: UnifiedJobItem[] = streamTasks.map((st) => ({
         id: st.id,
         filename: st.fileName || "Sin nombre",
         sourceUrl: st.sourceUrl || "",
@@ -437,7 +545,7 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
       }));
 
       // 4. Normalize Sequential Jobs
-      const normalizedSeq: UnifiedJobItem[] = (Array.isArray(seqJobs) ? seqJobs : []).map((sj) => ({
+      const normalizedSeq: UnifiedJobItem[] = seqJobs.map((sj) => ({
         id: sj.id,
         filename: sj.customName || sj.fileName || "Sin nombre",
         sourceUrl: sj.url || "",
@@ -460,36 +568,65 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
         rawSequentialJob: sj,
       }));
 
-      // 5. Combine and merge with local cache to survive serverless instance switching
-      const freshCombined = [...normalizedStream, ...normalizedSeq];
-      const cached = getCachedJobs();
+      const existingJobs = unifiedJobsRef.current;
+      const existingMap = new Map<string, UnifiedJobItem>(existingJobs.map((j) => [j.id, j]));
+
+      const freshCombined: UnifiedJobItem[] = [];
+
+      if (streamOk) {
+        freshCombined.push(...normalizedStream);
+      } else {
+        // Preservar tareas de stream existentes con velocidades congeladas
+        const preservedStream = existingJobs
+          .filter((j) => j.engineType === "stream")
+          .map((j) => ({
+            ...j,
+            downloadSpeedStr: "0 MB/s",
+            uploadSpeedStr: "0 MB/s",
+          }));
+        freshCombined.push(...preservedStream);
+      }
+
+      if (seqOk) {
+        freshCombined.push(...normalizedSeq);
+      } else {
+        // Preservar tareas secuenciales existentes con velocidades congeladas
+        const preservedSeq = existingJobs
+          .filter((j) => j.engineType === "sequential")
+          .map((j) => ({
+            ...j,
+            downloadSpeedStr: "0 MB/s",
+            uploadSpeedStr: "0 MB/s",
+          }));
+        freshCombined.push(...preservedSeq);
+      }
+
       const deletedIds = getDeletedJobIds();
 
       const jobsMap = new Map<string, UnifiedJobItem>();
 
-      // Populate from cache first (excluding deleted and other accounts)
-      for (const cj of cached) {
-        if (!deletedIds.has(cj.id)) {
-          const cjEmail = cj.rawStreamTask?.accountEmail || cj.rawSequentialJob?.accountEmail;
-          if (activeAccountEmail && cjEmail && cjEmail.toLowerCase() !== activeAccountEmail.toLowerCase()) continue;
-          jobsMap.set(cj.id, cj);
-        }
-      }
-
-      // Overwrite/update with fresh server tasks with monotonic protection
+      // Populate authoritative jobs directly from the live server response
       for (const fj of freshCombined) {
-        if (!deletedIds.has(fj.id)) {
-          const existing = jobsMap.get(fj.id);
-          if (existing && (existing.status === "streaming" || existing.status === "downloading" || existing.status === "starting")) {
-            // Prevent progress from bouncing backwards if a serverless instance returns a stale progress value
-            fj.downloadedBytes = Math.max(existing.downloadedBytes || 0, fj.downloadedBytes || 0);
-            fj.progressPercent = Math.max(existing.progressPercent || 0, fj.progressPercent || 0);
-            if (fj.status === "paused" && existing.status === "streaming" && fj.progressPercent < 100) {
-              fj.status = "streaming";
-            }
-          }
-          jobsMap.set(fj.id, fj);
+        if (deletedIds.has(fj.id)) continue;
+        const existing = existingMap.get(fj.id);
+
+        // Anti-regression guard: a completed task must never regress back to streaming or queued
+        if (existing && existing.status === "completed" && fj.status !== "completed") {
+          fj.status = "completed";
+          fj.progressPercent = 100;
+          fj.downloadedBytes = fj.totalBytes;
+          fj.downloadSpeedStr = "0 MB/s";
+          fj.uploadSpeedStr = "0 MB/s";
+          fj.error = undefined;
         }
+
+        // Monotonic bytes: bytes never jump backwards while streaming
+        if (existing && existing.id === fj.id && existing.status === fj.status) {
+          fj.downloadedBytes = Math.max(existing.downloadedBytes || 0, fj.downloadedBytes || 0);
+          fj.progressPercent = Math.max(existing.progressPercent || 0, fj.progressPercent || 0);
+        }
+
+        jobsMap.set(fj.id, fj);
       }
 
       const merged = Array.from(jobsMap.values()).sort((a, b) => {
@@ -517,6 +654,7 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
 
         return b.startedAt - a.startedAt;
       });
+
       saveCachedJobs(merged);
 
       setUnifiedJobs((prev) => {
@@ -545,19 +683,35 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
     } catch (e) {
       console.warn("Error fetching unified jobs:", e);
     } finally {
+      isFetchingRef.current = false;
       setIsLoading(false);
     }
-  }, [selectedJobId, activeToken, activeFolderId]);
+  }, [selectedJobId, activeToken, activeFolderId, activeAccountEmail]);
 
+  // Controlled sequential polling loop: never overlaps, never floods requests, no re-render cascades
   useEffect(() => {
-    fetchAllJobs();
-    const hasActiveTasks = unifiedJobs.some(
-      (j) => j.status === "streaming" || j.status === "downloading" || j.status === "starting" || j.status === "queued"
-    );
-    const intervalMs = hasActiveTasks ? 800 : 3000;
-    const timer = setInterval(fetchAllJobs, intervalMs);
-    return () => clearInterval(timer);
-  }, [fetchAllJobs, unifiedJobs]);
+    let isMounted = true;
+    let timer: NodeJS.Timeout | null = null;
+
+    const runPollingCycle = async () => {
+      if (!isMounted) return;
+      await fetchAllJobs();
+      if (!isMounted) return;
+
+      const hasActiveTasks = unifiedJobsRef.current.some(
+        (j) => j.status === "streaming" || j.status === "downloading" || j.status === "starting" || j.status === "queued"
+      );
+      const delay = hasActiveTasks ? 1500 : 4000;
+      timer = setTimeout(runPollingCycle, delay);
+    };
+
+    runPollingCycle();
+
+    return () => {
+      isMounted = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [fetchAllJobs]);
 
   // Keep local drive session updated
   useEffect(() => {
@@ -1331,6 +1485,23 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
               <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-[#161a1f] text-[#10b981] border border-[#262b32]">
                 {activeCount} Activos / {unifiedJobs.length} Total
               </span>
+              {syncState.isStale ? (
+                <span
+                  className="px-2 py-0.5 rounded text-[10px] font-mono bg-[#7f1d1d]/40 text-[#f87171] border border-[#ef4444]/40 flex items-center gap-1.5 animate-pulse"
+                  title={syncState.lastError || "Datos posiblemente desactualizados"}
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#ef4444]" />
+                  Desconectado
+                </span>
+              ) : syncState.lastSuccessfulSync ? (
+                <span
+                  className="px-2 py-0.5 rounded text-[10px] font-mono bg-[#064e3b]/30 text-[#34d399] border border-[#059669]/30 flex items-center gap-1.5"
+                  title={`Última sincronización: ${new Date(syncState.lastSuccessfulSync).toLocaleTimeString()}`}
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#10b981]" />
+                  En línea
+                </span>
+              ) : null}
             </div>
             <p className="text-xs text-[#9ca3af]">
               Gestiona todas tus transferencias (Streaming Zero-Disk y Descargas Secuenciales) en un solo panel centralizado.
@@ -1446,6 +1617,37 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Sync Stale / Disconnection Alert Banner */}
+      {syncState.isStale && (
+        <div className="bg-[#7f1d1d]/20 border border-[#ef4444]/50 rounded-xl p-3.5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs shadow-md animate-fadeIn">
+          <div className="flex items-center gap-3">
+            <div className="p-2 rounded-lg bg-[#7f1d1d]/40 text-[#f87171] shrink-0 border border-[#ef4444]/40">
+              <AlertCircle className="w-4 h-4 text-[#f87171]" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="font-bold text-[#fca5a5]">Datos posiblemente obsoletos</span>
+                {syncState.lastSuccessfulSync && (
+                  <span className="text-[10px] font-mono text-[#f87171]/80">
+                    (Última sync exitosa: hace {Math.max(1, Math.round((Date.now() - syncState.lastSuccessfulSync) / 1000))}s)
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-[#f87171]/90 mt-0.5">
+                {syncState.lastError || "No se ha podido conectar con el backend. Las velocidades han sido pausadas en 0 MB/s para evitar datos falsos."}
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => fetchAllJobs()}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-[#ef4444]/20 hover:bg-[#ef4444]/30 text-[#fca5a5] border border-[#ef4444]/40 transition-colors shrink-0 cursor-pointer self-end sm:self-auto"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            <span>Reintentar</span>
+          </button>
+        </div>
+      )}
 
       {/* BitTorrent Queue Manager & Concurrency Control Bar */}
       <div className="bg-[#14171a] border border-[#22272e] rounded-xl px-4 py-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-sm font-sans text-xs">

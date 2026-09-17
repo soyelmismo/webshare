@@ -1866,9 +1866,18 @@ app.use(express.json({ limit: "50mb" }));
     }
   });
 
-  app.get("/api/stream/tasks", (req, res) => {
+  app.get("/api/stream/tasks", async (req, res) => {
     try {
-      const tasks = streamManager.getTasks();
+      let tasks = streamManager.getTasks();
+      const authHeader = req.headers.authorization;
+      const accessToken = authHeader ? authHeader.replace(/^Bearer\s+/i, "") : (req.query.accessToken as string);
+      const folderId = (req.query.folderId as string) || "";
+
+      // On serverless / cold start, if memory is empty and access token is present, auto-recover from Drive
+      if (tasks.length === 0 && accessToken) {
+        tasks = await streamManager.recoverFromDriveFolder(accessToken, folderId);
+      }
+
       res.json(tasks);
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Error al listar tareas de streaming" });

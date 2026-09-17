@@ -67,6 +67,27 @@ interface UnifiedJobListProps {
   onJobSelect?: (job: UnifiedJobItem) => void;
 }
 
+const LOCAL_JOBS_CACHE_KEY = "gdrive_unified_jobs_cache";
+
+function getCachedJobs(): UnifiedJobItem[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = localStorage.getItem(LOCAL_JOBS_CACHE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveCachedJobs(jobs: UnifiedJobItem[]) {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(LOCAL_JOBS_CACHE_KEY, JSON.stringify(jobs.slice(0, 50)));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
 export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
   session: propSession,
   accessToken,
@@ -104,8 +125,14 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
   // Poll tasks from backend APIs every 1.5 seconds
   const fetchAllJobs = useCallback(async () => {
     try {
+      const headers: Record<string, string> = {};
+      if (activeToken) {
+        headers["Authorization"] = `Bearer ${activeToken}`;
+      }
+
       // 1. Fetch Stream Tasks (Zero-Disk direct streaming)
-      const streamRes = await fetch("/api/stream/tasks").catch(() => null);
+      const streamUrl = `/api/stream/tasks?folderId=${encodeURIComponent(activeFolderId)}`;
+      const streamRes = await fetch(streamUrl, { headers }).catch(() => null);
       let streamTasks: StreamDriveTask[] = [];
       if (streamRes && streamRes.ok) {
         streamTasks = await streamRes.json().catch(() => []);
@@ -172,19 +199,35 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
         rawSequentialJob: sj,
       }));
 
-      // 5. Combine and sort by startedAt descending
-      const combined = [...normalizedStream, ...normalizedSeq].sort((a, b) => b.startedAt - a.startedAt);
-      setUnifiedJobs(combined);
+      // 5. Combine and merge with local cache to survive serverless instance switching
+      const freshCombined = [...normalizedStream, ...normalizedSeq];
+      const cached = getCachedJobs();
 
-      if (!selectedJobId && combined.length > 0) {
-        setSelectedJobId(combined[0].id);
+      const jobsMap = new Map<string, UnifiedJobItem>();
+
+      // Populate from cache first
+      for (const cj of cached) {
+        jobsMap.set(cj.id, cj);
+      }
+
+      // Overwrite/update with fresh server tasks
+      for (const fj of freshCombined) {
+        jobsMap.set(fj.id, fj);
+      }
+
+      const merged = Array.from(jobsMap.values()).sort((a, b) => b.startedAt - a.startedAt);
+      saveCachedJobs(merged);
+      setUnifiedJobs(merged);
+
+      if (!selectedJobId && merged.length > 0) {
+        setSelectedJobId(merged[0].id);
       }
     } catch (e) {
       console.warn("Error fetching unified jobs:", e);
     } finally {
       setIsLoading(false);
     }
-  }, [selectedJobId]);
+  }, [selectedJobId, activeToken, activeFolderId]);
 
   useEffect(() => {
     fetchAllJobs();
@@ -306,6 +349,14 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
     }
   };
 
+  const removeJobFromCacheAndState = (jobId: string) => {
+    setUnifiedJobs((prev) => {
+      const updated = prev.filter((j) => j.id !== jobId);
+      saveCachedJobs(updated);
+      return updated;
+    });
+  };
+
   const handleCancelJob = async (job: UnifiedJobItem) => {
     setActionJobId(job.id);
     try {
@@ -318,6 +369,7 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
       } else {
         await fetch(`/api/sequential/jobs/${job.id}/cancel`, { method: "POST" });
       }
+      removeJobFromCacheAndState(job.id);
       await fetchAllJobs();
     } catch (e) {
       console.error("Error canceling job:", e);
@@ -338,6 +390,7 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
           body: JSON.stringify({ taskId: job.id, accessToken: activeToken }),
         });
       }
+      removeJobFromCacheAndState(job.id);
       await fetchAllJobs();
     } catch (e) {
       console.error("Error deleting job:", e);

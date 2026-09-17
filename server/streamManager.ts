@@ -228,12 +228,40 @@ export class StreamTransferManager {
   private driveFolderCache: Map<string, string> = new Map();
   private driveFolderInFlight: Map<string, Promise<string>> = new Map();
 
+  private sharedTorrentBase64: Map<string, string> = new Map();
+
   // BitTorrent-style Queue Scheduler
   private maxConcurrentDownloads: number = 2;
   private activeAccountTokens: Map<string, string> = new Map();
   private isDispatchingQueue: boolean = false;
   private queueWatchdogTimer: NodeJS.Timeout | null = null;
   private saveTasksDebounceTimer: NodeJS.Timeout | null = null;
+
+  /**
+   * Retrieves the raw torrent base64 string associated with a task without duplicating it in memory.
+   */
+  public getTorrentBase64ForTask(task?: StreamDriveTask | null): string | undefined {
+    if (!task) return undefined;
+    if (task.torrentBase64) return task.torrentBase64;
+    if (task.batchId && this.sharedTorrentBase64.has(task.batchId)) {
+      return this.sharedTorrentBase64.get(task.batchId);
+    }
+    if (task.sourceUrl && this.sharedTorrentBase64.has(task.sourceUrl)) {
+      return this.sharedTorrentBase64.get(task.sourceUrl);
+    }
+    if (this.sharedTorrentBase64.has(task.id)) {
+      return this.sharedTorrentBase64.get(task.id);
+    }
+    return undefined;
+  }
+
+  /**
+   * Sets or updates the raw torrent base64 string in shared memory.
+   */
+  public setTorrentBase64ForTask(key: string, base64: string): void {
+    if (!key || !base64) return;
+    this.sharedTorrentBase64.set(key, base64);
+  }
 
   constructor() {
     this.cleanupDiskCache();
@@ -594,7 +622,34 @@ export class StreamTransferManager {
     try {
       if (fs.existsSync(TASKS_CACHE_FILE)) {
         const raw = fs.readFileSync(TASKS_CACHE_FILE, "utf-8");
-        const list = JSON.parse(raw) as StreamDriveTask[];
+        const parsed = JSON.parse(raw);
+
+        let list: StreamDriveTask[] = [];
+
+        // Check if file is version 2 format with shared torrents
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && parsed.version === 2) {
+          if (parsed.torrents && typeof parsed.torrents === "object") {
+            for (const [k, v] of Object.entries(parsed.torrents)) {
+              if (typeof v === "string" && v) {
+                this.sharedTorrentBase64.set(k, v);
+              }
+            }
+          }
+          list = Array.isArray(parsed.tasks) ? parsed.tasks : [];
+        } else if (Array.isArray(parsed)) {
+          // Version 1 legacy format: migrate and deduplicate
+          list = parsed;
+          for (const t of list) {
+            if (t.torrentBase64) {
+              const dedupeKey = t.batchId || t.sourceUrl || t.id;
+              if (!this.sharedTorrentBase64.has(dedupeKey)) {
+                this.sharedTorrentBase64.set(dedupeKey, t.torrentBase64);
+              }
+              t.torrentBase64 = undefined;
+            }
+          }
+        }
+
         if (Array.isArray(list)) {
           for (const t of list) {
             // Streaming tasks that were interrupted by a server reboot/crash are loaded as paused
@@ -602,9 +657,17 @@ export class StreamTransferManager {
               t.status = "paused";
               t.speedMBs = 0;
             }
+            // Ensure torrentBase64 is never duplicated in memory on individual tasks
+            if (t.torrentBase64) {
+              const dedupeKey = t.batchId || t.sourceUrl || t.id;
+              if (!this.sharedTorrentBase64.has(dedupeKey)) {
+                this.sharedTorrentBase64.set(dedupeKey, t.torrentBase64);
+              }
+              t.torrentBase64 = undefined;
+            }
             this.tasks.set(t.id, t);
           }
-          console.log(`[StreamManager] ${list.length} tareas cargadas desde caché local persistente.`);
+          console.log(`[StreamManager] ${list.length} tareas cargadas desde caché local persistente (formato optimizado).`);
         }
       }
     } catch (e) {
@@ -617,14 +680,49 @@ export class StreamTransferManager {
    * Debounced to 1.5 seconds and non-blocking to prevent CPU/SD-card stall on edge devices.
    */
   public saveTasksToDisk(immediate: boolean = false): void {
+    const serializeData = () => {
+      const activeSharedTorrents: Record<string, string> = {};
+      const strippedTasks: StreamDriveTask[] = [];
+
+      for (const t of this.tasks.values()) {
+        const b64 = this.getTorrentBase64ForTask(t);
+        if (b64) {
+          const key = t.batchId || t.sourceUrl || t.id;
+          activeSharedTorrents[key] = b64;
+        }
+
+        if (t.torrentBase64) {
+          const { torrentBase64, ...rest } = t;
+          strippedTasks.push(rest as StreamDriveTask);
+        } else {
+          strippedTasks.push(t);
+        }
+      }
+
+      // Prune dead torrents from memory
+      this.sharedTorrentBase64.clear();
+      for (const [k, v] of Object.entries(activeSharedTorrents)) {
+        this.sharedTorrentBase64.set(k, v);
+      }
+
+      return JSON.stringify(
+        {
+          version: 2,
+          torrents: activeSharedTorrents,
+          tasks: strippedTasks,
+        },
+        null,
+        2
+      );
+    };
+
     if (immediate) {
       if (this.saveTasksDebounceTimer) {
         clearTimeout(this.saveTasksDebounceTimer);
         this.saveTasksDebounceTimer = null;
       }
       try {
-        const list = Array.from(this.tasks.values());
-        fs.writeFileSync(TASKS_CACHE_FILE, JSON.stringify(list, null, 2), "utf-8");
+        fs.writeFileSync(TASKS_CACHE_FILE, serializeData(), "utf-8");
       } catch (e) {
         console.warn("No se pudo persistir caché de tareas en disco:", e);
       }
@@ -635,8 +733,8 @@ export class StreamTransferManager {
     this.saveTasksDebounceTimer = setTimeout(() => {
       this.saveTasksDebounceTimer = null;
       try {
-        const list = Array.from(this.tasks.values());
-        fs.promises.writeFile(TASKS_CACHE_FILE, JSON.stringify(list, null, 2), "utf-8").catch(() => {});
+        const content = serializeData();
+        fs.promises.writeFile(TASKS_CACHE_FILE, content, "utf-8").catch(() => {});
       } catch {}
     }, 1500);
 
@@ -654,10 +752,12 @@ export class StreamTransferManager {
   public async destroyTorrentForTask(task: StreamDriveTask): Promise<void> {
     (task as any).prefetchedChunk = undefined;
     const client = await getWebTorrentClient().catch(() => null);
+    const b64 = this.getTorrentBase64ForTask(task);
     const candidates = [
       task.id,
+      task.batchId,
       task.sourceUrl,
-      task.torrentBase64,
+      b64,
       (task as any).infoHash,
     ].filter(Boolean) as string[];
 
@@ -667,7 +767,8 @@ export class StreamTransferManager {
       if (other.status !== "streaming" && other.status !== "queued") return false;
       if (task.batchId && other.batchId && task.batchId === other.batchId) return true;
       if (task.sourceUrl && other.sourceUrl && task.sourceUrl === other.sourceUrl) return true;
-      if (task.torrentBase64 && other.torrentBase64 && task.torrentBase64 === other.torrentBase64) return true;
+      const otherB64 = this.getTorrentBase64ForTask(other);
+      if (b64 && otherB64 && b64 === otherB64) return true;
       return false;
     });
 
@@ -678,8 +779,9 @@ export class StreamTransferManager {
       try {
         const activeTorrent =
           this.torrentsMap.get(task.id) ||
-          (task.torrentBase64 ? this.torrentsMap.get(task.torrentBase64) : null) ||
-          this.torrentsMap.get(task.sourceUrl);
+          (task.batchId ? this.torrentsMap.get(task.batchId) : null) ||
+          this.torrentsMap.get(task.sourceUrl) ||
+          (b64 ? this.torrentsMap.get(b64) : null);
         if (activeTorrent && activeTorrent.files) {
           const file = activeTorrent.files.find((f: any) => {
             const cleanPath = (f.path || "").replace(/\\/g, "/");
@@ -710,6 +812,9 @@ export class StreamTransferManager {
         }
       }
     }
+
+    if (task.batchId) this.sharedTorrentBase64.delete(task.batchId);
+    this.sharedTorrentBase64.delete(task.id);
   }
 
   /**
@@ -718,10 +823,12 @@ export class StreamTransferManager {
   public evictConfirmedPieces(task: StreamDriveTask, committedBytes: number): void {
     if (task.sourceType !== "torrent") return;
     try {
+      const b64 = this.getTorrentBase64ForTask(task);
       const activeTorrent =
         this.torrentsMap.get(task.id) ||
-        (task.torrentBase64 ? this.torrentsMap.get(task.torrentBase64) : null) ||
-        this.torrentsMap.get(task.sourceUrl);
+        (task.batchId ? this.torrentsMap.get(task.batchId) : null) ||
+        this.torrentsMap.get(task.sourceUrl) ||
+        (b64 ? this.torrentsMap.get(b64) : null);
       if (!activeTorrent || !activeTorrent.store || !activeTorrent.pieceLength) return;
 
       let targetFile: any = null;
@@ -904,22 +1011,36 @@ export class StreamTransferManager {
 
   public getTasks(folderId?: string, accountEmail?: string): StreamDriveTask[] {
     const all = Array.from(this.tasks.values()).sort((a, b) => b.startedAt - a.startedAt);
-    return all.filter((t) => {
-      if (
-        accountEmail &&
-        accountEmail.trim() !== "" &&
-        t.accountEmail &&
-        t.accountEmail.trim() !== "" &&
-        t.accountEmail.toLowerCase() !== accountEmail.trim().toLowerCase()
-      ) {
-        return false;
-      }
-      return true;
-    });
+    return all
+      .filter((t) => {
+        if (
+          accountEmail &&
+          accountEmail.trim() !== "" &&
+          t.accountEmail &&
+          t.accountEmail.trim() !== "" &&
+          t.accountEmail.toLowerCase() !== accountEmail.trim().toLowerCase()
+        ) {
+          return false;
+        }
+        return true;
+      })
+      .map((t) => {
+        if (t.torrentBase64) {
+          const { torrentBase64, ...rest } = t;
+          return rest as StreamDriveTask;
+        }
+        return t;
+      });
   }
 
   public getTask(id: string): StreamDriveTask | undefined {
-    return this.tasks.get(id);
+    const t = this.tasks.get(id);
+    if (!t) return undefined;
+    if (t.torrentBase64) {
+      const { torrentBase64, ...rest } = t;
+      return rest as StreamDriveTask;
+    }
+    return t;
   }
 
   /**
@@ -1365,13 +1486,20 @@ export class StreamTransferManager {
       assignedQueueIndex = currentQueued + 1;
     }
 
+    const b64 = inspected.torrentBase64 || torrentBase64;
+    if (b64) {
+      this.setTorrentBase64ForTask(taskId, b64);
+      if (batchId) this.setTorrentBase64ForTask(batchId, b64);
+      if (sourceUrl) this.setTorrentBase64ForTask(sourceUrl, b64);
+    }
+
     const task: StreamDriveTask = {
       id: taskId,
       accountEmail: accountEmail || undefined,
       fileName,
       sourceUrl,
       sourceType: inspected.sourceType,
-      torrentBase64: inspected.torrentBase64 || torrentBase64,
+      torrentBase64: undefined, // Deduplicated: cached in sharedTorrentBase64
       webSeeds: inspected.webSeeds,
       activeMirrorUrl: inspected.activeMirrorUrl,
       fileSize: inspected.fileSize,
@@ -1408,7 +1536,7 @@ export class StreamTransferManager {
           fileName,
           sourceUrl,
           sourceType: inspected.sourceType,
-          torrentBase64: task.torrentBase64,
+          torrentBase64: this.getTorrentBase64ForTask(task),
           webSeeds: task.webSeeds,
           fileSize: inspected.fileSize,
           chunkSizeBytes,
@@ -1498,6 +1626,12 @@ export class StreamTransferManager {
     let availableSlots = Math.max(0, this.maxConcurrentDownloads - activeCount);
     const baseTargetFolder = folderId && folderId.trim() !== "" ? folderId.trim() : "root";
 
+    const b64 = inspected.torrentBase64 || torrentBase64;
+    if (b64) {
+      this.setTorrentBase64ForTask(batchId, b64);
+      if (sourceUrl) this.setTorrentBase64ForTask(sourceUrl, b64);
+    }
+
     // 2. Pure in-memory synchronous loop: creates 300+ tasks in <2ms!
     const now = Date.now();
     for (let i = 0; i < files.length; i++) {
@@ -1519,7 +1653,7 @@ export class StreamTransferManager {
         fileName,
         sourceUrl,
         sourceType: inspected.sourceType || "torrent",
-        torrentBase64: inspected.torrentBase64 || torrentBase64,
+        torrentBase64: undefined, // Deduplicated: cached once in sharedTorrentBase64 for batchId
         webSeeds: inspected.webSeeds,
         activeMirrorUrl: inspected.activeMirrorUrl,
         fileSize,
@@ -1660,7 +1794,7 @@ export class StreamTransferManager {
             fileName: task.fileName,
             sourceUrl: task.sourceUrl,
             sourceType: task.sourceType,
-            torrentBase64: task.torrentBase64,
+            torrentBase64: this.getTorrentBase64ForTask(task),
             webSeeds: task.webSeeds,
             fileSize: task.fileSize,
             chunkSizeBytes: task.chunkSizeBytes,
@@ -1758,7 +1892,7 @@ export class StreamTransferManager {
           start,
           end,
           signal: abortSignal,
-          torrentBase64: task.torrentBase64,
+          torrentBase64: this.getTorrentBase64ForTask(task),
           webSeeds: task.webSeeds,
           activeMirrorUrl: task.activeMirrorUrl,
         });
@@ -1786,7 +1920,7 @@ export class StreamTransferManager {
           start: nextStart,
           end: nextEnd,
           signal: abortSignal,
-          torrentBase64: task.torrentBase64,
+          torrentBase64: this.getTorrentBase64ForTask(task),
           webSeeds: task.webSeeds,
           activeMirrorUrl: task.activeMirrorUrl,
         }).catch((err) => {
@@ -1826,10 +1960,12 @@ export class StreamTransferManager {
 
         // Update live torrent swarm telemetry if applicable
         if (task.sourceType === "torrent") {
+          const b64 = this.getTorrentBase64ForTask(task);
           const activeTorrent =
             this.torrentsMap.get(task.id) ||
-            (task.torrentBase64 ? this.torrentsMap.get(task.torrentBase64) : null) ||
-            this.torrentsMap.get(task.sourceUrl);
+            (task.batchId ? this.torrentsMap.get(task.batchId) : null) ||
+            this.torrentsMap.get(task.sourceUrl) ||
+            (b64 ? this.torrentsMap.get(b64) : null);
           if (activeTorrent) {
             task.torrentSpeedMBs = Number(((activeTorrent.downloadSpeed || 0) / (1024 * 1024)).toFixed(1));
             task.peers = typeof activeTorrent.numPeers === "number" ? activeTorrent.numPeers : 0;
@@ -1898,10 +2034,12 @@ export class StreamTransferManager {
         try {
           const client = activeWebTorrentClient;
           if (client) {
+            const b64 = this.getTorrentBase64ForTask(task);
             const torrent =
               this.torrentsMap.get(taskId) ||
-              (task.torrentBase64 ? this.torrentsMap.get(task.torrentBase64) : null) ||
-              this.torrentsMap.get(task.sourceUrl);
+              (task.batchId ? this.torrentsMap.get(task.batchId) : null) ||
+              this.torrentsMap.get(task.sourceUrl) ||
+              (b64 ? this.torrentsMap.get(b64) : null);
             if (torrent) {
               task.torrentSpeedMBs = Number(((torrent.downloadSpeed || 0) / (1024 * 1024)).toFixed(1));
               task.peers = typeof torrent.numPeers === "number" ? torrent.numPeers : 0;
@@ -2024,7 +2162,7 @@ export class StreamTransferManager {
     // Auto-discover WebSeeds from cache or base64 if not yet loaded on task
     if (mirrorCandidates.length === 0) {
       try {
-        let b64 = torrentBase64;
+        let b64 = torrentBase64 || this.getTorrentBase64ForTask(task);
         if (!b64 && sourceUrl.startsWith("magnet:")) {
           const match = sourceUrl.match(/xt=urn:btih:([a-zA-Z0-9]+)/i);
           if (match && match[1]) {
@@ -2042,7 +2180,9 @@ export class StreamTransferManager {
                 if (res.ok) {
                   const buf = Buffer.from(await res.arrayBuffer());
                   b64 = buf.toString("base64");
-                  if (task) task.torrentBase64 = b64;
+                  if (task) {
+                    this.setTorrentBase64ForTask(task.batchId || task.sourceUrl || task.id, b64);
+                  }
                   break;
                 }
               } catch {}
@@ -2082,7 +2222,7 @@ export class StreamTransferManager {
       sourceUrl,
       start,
       end,
-      task?.torrentBase64 || torrentBase64,
+      this.getTorrentBase64ForTask(task) || torrentBase64,
       signal,
       (task as any)?.selectedFilePath,
       task?.fileSize
@@ -2292,7 +2432,7 @@ export class StreamTransferManager {
           fileName: task.fileName,
           sourceUrl: task.sourceUrl,
           sourceType: task.sourceType,
-          torrentBase64: task.torrentBase64,
+          torrentBase64: this.getTorrentBase64ForTask(task),
           webSeeds: task.webSeeds,
           fileSize: task.fileSize,
           chunkSizeBytes: task.chunkSizeBytes,
@@ -2488,8 +2628,10 @@ export class StreamTransferManager {
     // If torrentBase64 or webSeeds are missing, attempt recovery before resuming
     if (task.sourceType === "torrent" && (!task.webSeeds || task.webSeeds.length === 0)) {
       try {
-        const inspected = await this.inspectSource(task.sourceUrl, task.torrentBase64);
-        if (inspected.torrentBase64) task.torrentBase64 = inspected.torrentBase64;
+        const inspected = await this.inspectSource(task.sourceUrl, this.getTorrentBase64ForTask(task));
+        if (inspected.torrentBase64) {
+          this.setTorrentBase64ForTask(task.batchId || task.sourceUrl || task.id, inspected.torrentBase64);
+        }
         if (inspected.webSeeds) task.webSeeds = inspected.webSeeds;
         if (inspected.activeMirrorUrl) task.activeMirrorUrl = inspected.activeMirrorUrl;
       } catch (e) {
@@ -2735,8 +2877,21 @@ export class StreamTransferManager {
         );
 
         if (!contentRes.ok) continue;
-        const manifest = (await contentRes.json()) as StreamManifestData;
-        if (!manifest || !manifest.taskId || !manifest.resumableUploadUrl) continue;
+        const manifest = (await contentRes.json()) as any;
+        if (!manifest) continue;
+
+        // If batch manifest, cache its torrentBase64 in memory
+        if (manifest.type === "batch") {
+          if (manifest.batchId && manifest.torrentBase64) {
+            this.setTorrentBase64ForTask(manifest.batchId, manifest.torrentBase64);
+            if (manifest.sourceUrl) {
+              this.setTorrentBase64ForTask(manifest.sourceUrl, manifest.torrentBase64);
+            }
+          }
+          continue;
+        }
+
+        if (!manifest.taskId || !manifest.resumableUploadUrl) continue;
 
         // Delete duplicate manifest files from Drive if seen before
         if (seenTaskIds.has(manifest.taskId)) {
@@ -2775,13 +2930,19 @@ export class StreamTransferManager {
         const progressPercent = Math.min(100, Math.round((actualCommitted / manifest.fileSize) * 100));
         const isFinished = actualCommitted >= manifest.fileSize;
 
+        if (manifest.torrentBase64) {
+          this.setTorrentBase64ForTask(manifest.taskId, manifest.torrentBase64);
+          if (manifest.batchId) this.setTorrentBase64ForTask(manifest.batchId, manifest.torrentBase64);
+          if (manifest.sourceUrl) this.setTorrentBase64ForTask(manifest.sourceUrl, manifest.torrentBase64);
+        }
+
         const recoveredTask: StreamDriveTask = {
           id: manifest.taskId,
           accountEmail: manifest.accountEmail || accountEmail,
           fileName: manifest.fileName,
           sourceUrl: manifest.sourceUrl,
           sourceType: manifest.sourceType,
-          torrentBase64: manifest.torrentBase64,
+          torrentBase64: undefined, // Deduplicated: cached in sharedTorrentBase64
           webSeeds: manifest.webSeeds,
           fileSize: manifest.fileSize,
           fileSizeFormatted: formatBytes(manifest.fileSize),

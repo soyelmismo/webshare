@@ -882,6 +882,25 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
     return groupJobsIntoPackages(filteredJobs);
   }, [filteredJobs]);
 
+  // Auto-collapse subfolders for large batches on initial detection to prevent browser DOM lag
+  const seenBatchIdsRef = React.useRef<Set<string>>(new Set());
+  useEffect(() => {
+    for (const pkg of torrentPackages) {
+      if (pkg.isBatch && !seenBatchIdsRef.current.has(pkg.id)) {
+        seenBatchIdsRef.current.add(pkg.id);
+        if (pkg.jobs.length > 15) {
+          setCollapsedFolderKeys((prev) => {
+            const next = new Set(prev);
+            for (const sub of pkg.subfolders) {
+              next.add(`${pkg.id}:${sub.folderPath}`);
+            }
+            return next;
+          });
+        }
+      }
+    }
+  }, [torrentPackages]);
+
   const togglePackageCollapse = (pkgId: string) => {
     setCollapsedPackageIds((prev) => {
       const next = new Set(prev);

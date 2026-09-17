@@ -244,6 +244,19 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
       if (info.files && info.files.length > 0) {
         // By default select all files in multi-file torrent
         setSelectedFilePaths(new Set(info.files.map((f) => f.path)));
+
+        // If there are many files (> 15), auto-collapse all folders so the browser doesn't choke rendering hundreds of DOM rows
+        if (info.files.length > 15) {
+          const folderPaths = new Set<string>();
+          for (const f of info.files) {
+            const clean = f.path.replace(/\\/g, "/");
+            const dir = clean.includes("/") ? clean.substring(0, clean.lastIndexOf("/")) : "";
+            folderPaths.add(dir);
+          }
+          setCollapsedFolders(folderPaths);
+        } else {
+          setCollapsedFolders(new Set());
+        }
       }
     } catch (err: any) {
       setInspectError(err.message || "Error al inspeccionar el enlace o torrent");
@@ -597,6 +610,22 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
                           <span>Lista Plana</span>
                         </button>
                       </div>
+
+                      {fileViewMode === "tree" && folderGroups.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (collapsedFolders.size >= folderGroups.length) {
+                              setCollapsedFolders(new Set());
+                            } else {
+                              setCollapsedFolders(new Set(folderGroups.map(([p]) => p)));
+                            }
+                          }}
+                          className="text-[11px] text-[#9ca3af] hover:text-[#f3f4f6] hover:underline cursor-pointer"
+                        >
+                          {collapsedFolders.size >= folderGroups.length ? "Expandir Carpetas" : "Contraer Carpetas"}
+                        </button>
+                      )}
 
                       <button
                         type="button"

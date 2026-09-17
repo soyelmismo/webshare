@@ -211,10 +211,72 @@ export class StreamTransferManager {
   private abortControllers: Map<string, AbortController> = new Map();
   private torrentsMap: Map<string, any> = new Map();
   private deletedTaskIds: Set<string> = new Set();
+  private descargasFolderCache: Map<string, string> = new Map();
 
   constructor() {
     this.cleanupDiskCache();
     this.loadTasksFromDisk();
+  }
+
+  /**
+   * Gets or creates the default 'Descargas Servidor' folder in Google Drive.
+   * Centralizes all manifest files in 'Descargas Servidor' while the downloaded files
+   * upload directly to any custom selected folder.
+   */
+  public async getOrCreateDescargasServidorFolder(accessToken: string): Promise<string> {
+    if (!accessToken) return "";
+
+    if (this.descargasFolderCache.has(accessToken)) {
+      return this.descargasFolderCache.get(accessToken)!;
+    }
+
+    try {
+      const query = `mimeType = 'application/vnd.google-apps.folder' and name = 'Descargas Servidor' and trashed = false`;
+      const searchRes = await fetchWithRetry(
+        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=files(id,name)&pageSize=1`,
+        {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          signal: AbortSignal.timeout(5000),
+        }
+      );
+
+      if (searchRes.ok) {
+        const data = (await searchRes.json()) as { files?: Array<{ id: string }> };
+        if (data.files && data.files.length > 0) {
+          const id = data.files[0].id;
+          this.descargasFolderCache.set(accessToken, id);
+          return id;
+        }
+      }
+
+      // Create 'Descargas Servidor' folder
+      const createRes = await fetchWithRetry(
+        "https://www.googleapis.com/drive/v3/files?fields=id",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            name: "Descargas Servidor",
+            mimeType: "application/vnd.google-apps.folder",
+          }),
+        }
+      );
+
+      if (createRes.ok) {
+        const created = (await createRes.json()) as { id: string };
+        if (created.id) {
+          this.descargasFolderCache.set(accessToken, created.id);
+          return created.id;
+        }
+      }
+    } catch (err) {
+      console.warn("[StreamManager] Error al obtener/crear carpeta Descargas Servidor:", err);
+    }
+
+    return "";
   }
 
   /**
@@ -559,11 +621,14 @@ export class StreamTransferManager {
       }
     }
 
-    // Create new manifest file in folder
+    // Create new manifest file in the 'Descargas Servidor' base folder
     try {
+      const descargasFolderId = await this.getOrCreateDescargasServidorFolder(accessToken);
+      const manifestParentFolder = descargasFolderId || folderId;
+
       const metadata = {
         name: manifestName,
-        parents: folderId ? [folderId] : [],
+        parents: manifestParentFolder && manifestParentFolder !== "root" ? [manifestParentFolder] : [],
         mimeType: "application/json",
         description: "Manifiesto de control de streaming para Server Specs Cloud Streamer",
       };
@@ -1590,12 +1655,17 @@ export class StreamTransferManager {
     const recoveredTasks: StreamDriveTask[] = [];
     const seenTaskIds = new Set<string>();
 
-    // 1. Search for stream manifests in the dedicated folder (if specified)
+    // 1. Search for stream manifests in the 'Descargas Servidor' base folder and custom folderId (if specified)
     let manifestFiles: Array<{ id: string; name: string }> = [];
 
-    if (folderId && folderId.trim()) {
+    const descargasFolderId = await this.getOrCreateDescargasServidorFolder(accessToken);
+    const targetParents = new Set<string>();
+    if (descargasFolderId) targetParents.add(descargasFolderId);
+    if (folderId && folderId.trim() && folderId !== "root") targetParents.add(folderId.trim());
+
+    for (const parentId of targetParents) {
       try {
-        const folderQuery = `name contains 'stream_manifest_' and trashed = false and '${folderId.trim()}' in parents`;
+        const folderQuery = `name contains 'stream_manifest_' and trashed = false and '${parentId}' in parents`;
         const folderUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(
           folderQuery
         )}&fields=files(id,name,modifiedTime)&pageSize=50`;
@@ -1607,11 +1677,15 @@ export class StreamTransferManager {
         if (folderRes.ok) {
           const data = (await folderRes.json()) as { files?: Array<{ id: string; name: string }> };
           if (data.files && data.files.length > 0) {
-            manifestFiles.push(...data.files);
+            for (const f of data.files) {
+              if (!manifestFiles.some((mf) => mf.id === f.id)) {
+                manifestFiles.push(f);
+              }
+            }
           }
         }
       } catch (err) {
-        console.warn("[StreamManager] Error al buscar manifiestos en carpeta específica:", err);
+        console.warn("[StreamManager] Error al buscar manifiestos en carpeta de origen:", err);
       }
     }
 

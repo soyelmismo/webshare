@@ -25,6 +25,7 @@ import {
   CheckSquare,
   FileText,
   FolderOpen,
+  Download,
 } from "lucide-react";
 import {
   StreamTask,
@@ -249,14 +250,23 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
         }
       } else {
         // Single file / direct download
+        const singleFile =
+          sourceInfo?.files && selectedFilePaths.size === 1
+            ? sourceInfo.files.find((f) => selectedFilePaths.has(f.path)) || sourceInfo.files[0]
+            : sourceInfo?.files && sourceInfo.files.length === 1
+            ? sourceInfo.files[0]
+            : undefined;
+
         const result = await startStreamJob({
           sourceUrl: url.trim(),
-          targetFilename: customFilename.trim() || undefined,
+          targetFilename: customFilename.trim() || (singleFile ? singleFile.name : undefined),
           folderId: targetFolder,
           accountEmail: activeAccountEmail,
           accessToken: activeTokenStr,
           chunkSizeMB: Number(chunkSizeMB) || 25,
           torrentBase64: torrentBase64 || undefined,
+          selectedFilePath: singleFile?.path,
+          selectedFileSize: singleFile?.length,
         });
         setActiveTaskId(result.task.id);
       }
@@ -531,7 +541,9 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
                               className="accent-[#10b981] rounded"
                             />
                             <FileText className="w-3.5 h-3.5 shrink-0 text-[#10b981]" />
-                            <span className="truncate text-[11px]">{file.name}</span>
+                            <span className="truncate text-[11px]" title={file.path}>
+                              {file.path && file.path.includes("/") ? file.path : file.name}
+                            </span>
                           </div>
                           <span className="text-[10px] font-mono text-[#34d399] shrink-0">
                             {formatBytes(file.length)}
@@ -612,6 +624,66 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
           </div>
         </form>
       </div>
+
+      {/* Live Stream / Torrent RAM Pipeline Monitor */}
+      {(() => {
+        const activeTask =
+          tasks.find(
+            (t) =>
+              t.id === activeTaskId &&
+              (t.status === "streaming" || t.status === "initializing" || t.status === "queued")
+          ) ||
+          tasks.find((t) => t.status === "streaming" || t.status === "initializing");
+
+        if (!activeTask) return null;
+
+        return (
+          <div className="bg-[#14171a] border border-[#10b981]/40 rounded-xl p-4 space-y-3 bg-gradient-to-br from-[#064e3b]/25 via-[#14171a] to-[#101317] shadow-lg">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <Activity className="w-4 h-4 text-[#10b981] animate-pulse shrink-0" />
+                <span className="text-xs font-bold text-[#f3f4f6] truncate">
+                  Stream Activo en RAM: {activeTask.fileName}
+                </span>
+                <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-[#10b981]/20 text-[#34d399] border border-[#059669]/50 shrink-0">
+                  {activeTask.status}
+                </span>
+              </div>
+
+              <div className="flex items-center gap-3 text-xs font-mono shrink-0">
+                {activeTask.sourceType === "torrent" && (
+                  <span className="text-[#34d399] flex items-center gap-1.5 bg-[#101317] px-2.5 py-1 rounded-md border border-[#22272e]">
+                    <Download className="w-3.5 h-3.5 text-[#34d399]" />
+                    <span>Swarm: {activeTask.torrentSpeedMBs ? `${activeTask.torrentSpeedMBs.toFixed(1)} MB/s` : "0.0 MB/s"}</span>
+                    {activeTask.peers !== undefined && (
+                      <span className="text-[#9ca3af]">({activeTask.peers} peers)</span>
+                    )}
+                  </span>
+                )}
+                <span className="text-[#10b981] flex items-center gap-1.5 bg-[#101317] px-2.5 py-1 rounded-md border border-[#22272e]">
+                  <CloudLightning className="w-3.5 h-3.5 text-[#10b981]" />
+                  <span>Drive: {activeTask.speedMBs ? `${activeTask.speedMBs.toFixed(1)} MB/s` : "0.0 MB/s"}</span>
+                </span>
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex justify-between text-[11px] font-mono text-[#9ca3af]">
+                <span>
+                  {formatBytes(activeTask.uploadedBytes)} de {formatBytes(activeTask.fileSize)}
+                </span>
+                <span className="text-[#10b981] font-bold">{activeTask.progressPercent}%</span>
+              </div>
+              <div className="w-full bg-[#101317] h-2 rounded-full overflow-hidden border border-[#22272e]">
+                <div
+                  className="bg-[#10b981] h-full transition-all duration-300 rounded-full"
+                  style={{ width: `${Math.min(100, activeTask.progressPercent)}%` }}
+                />
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Unified Jobs List */}
       <UnifiedJobList

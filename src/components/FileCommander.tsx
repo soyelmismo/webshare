@@ -140,7 +140,7 @@ export const FileCommander: React.FC<FileCommanderProps> = ({
         body: JSON.stringify({
           filePath: selectedLocal,
           accessToken: token,
-          folderId: session?.dedicatedFolderId,
+          folderId: session?.dedicatedFolderId || session?.folder?.id || session?.activeAccount?.folder?.id || "root",
         }),
       });
       if (res.ok) {

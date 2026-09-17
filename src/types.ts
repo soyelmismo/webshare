@@ -355,6 +355,7 @@ export interface StreamDriveTask {
   lastChunkAt?: number;
   completedAt?: number;
   selectedFilePath?: string;
+  rootFolderId?: string;
   queueIndex?: number;
   totalInBatch?: number;
   batchId?: string;
@@ -371,6 +372,7 @@ export interface StreamManifestData {
   chunkSizeBytes: number;
   resumableUploadUrl: string;
   driveFolderId: string;
+  rootFolderId?: string;
   uploadedBytes: number;
   currentChunkIndex: number;
   totalChunks: number;

@@ -55,6 +55,8 @@ export interface UnifiedJobItem {
   savedToDrive?: boolean;
   uploadStatus?: "idle" | "uploading" | "completed" | "error";
   uploadProgress?: number;
+  sourceType?: "torrent" | "direct";
+  peers?: number;
   rawStreamTask?: StreamDriveTask;
   rawSequentialJob?: SequentialStreamJob;
 }
@@ -190,7 +192,12 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
         queueIndex: st.queueIndex,
         totalInBatch: st.totalInBatch,
         progressPercent: Math.round(st.progressPercent || 0),
-        downloadSpeedStr: st.speedMBs ? `${st.speedMBs.toFixed(1)} MB/s` : "0 MB/s",
+        downloadSpeedStr:
+          st.sourceType === "torrent" && typeof st.torrentSpeedMBs === "number" && st.torrentSpeedMBs > 0
+            ? `${st.torrentSpeedMBs.toFixed(1)} MB/s`
+            : st.speedMBs
+            ? `${st.speedMBs.toFixed(1)} MB/s`
+            : "0 MB/s",
         uploadSpeedStr: st.speedMBs ? `${st.speedMBs.toFixed(1)} MB/s` : "0 MB/s",
         downloadedBytes: st.uploadedBytes || 0,
         totalBytes: st.fileSize || 0,
@@ -200,7 +207,10 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
         error: st.error,
         webViewLink: st.webViewLink,
         savedToDrive: st.status === "completed",
+        filePath: st.selectedFilePath,
         rawStreamTask: st,
+        peers: st.peers,
+        sourceType: st.sourceType,
       }));
 
       // 4. Normalize Sequential Jobs
@@ -274,6 +284,7 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
               p.progressPercent !== m.progressPercent ||
               p.downloadedBytes !== m.downloadedBytes ||
               p.downloadSpeedStr !== m.downloadSpeedStr ||
+              p.peers !== m.peers ||
               p.error !== m.error
             );
           });
@@ -812,6 +823,12 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
                   <span className="font-bold text-[#f3f4f6] text-sm truncate">
                     {selectedJob.filename}
                   </span>
+                  {selectedJob.filePath && selectedJob.filePath !== selectedJob.filename && (
+                    <span className="text-[10px] font-mono text-[#9ca3af] flex items-center gap-1 bg-[#101317] px-2 py-0.5 rounded border border-[#22272e]">
+                      <Folder className="w-3 h-3 text-[#10b981]" />
+                      <span className="truncate">{selectedJob.filePath}</span>
+                    </span>
+                  )}
 
                   {/* Engine Badge */}
                   {selectedJob.engineType === "stream" ? (
@@ -955,10 +972,17 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
             {/* Metrics Cards */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 font-sans">
               <div className="p-2.5 bg-[#101317] rounded-lg border border-[#22272e]">
-                <span className="text-[10px] text-[#9ca3af] block">Velocidad Bajada</span>
+                <span className="text-[10px] text-[#9ca3af] block">
+                  {selectedJob.sourceType === "torrent" ? "Velocidad Swarm" : "Velocidad Bajada"}
+                </span>
                 <span className="text-sm font-bold font-mono text-[#f3f4f6]">
                   {selectedJob.downloadSpeedStr}
                 </span>
+                {selectedJob.peers !== undefined && selectedJob.sourceType === "torrent" && (
+                  <span className="text-[10px] text-[#10b981] block mt-0.5 font-mono">
+                    {selectedJob.peers} peers
+                  </span>
+                )}
               </div>
               <div className="p-2.5 bg-[#101317] rounded-lg border border-[#22272e]">
                 <span className="text-[10px] text-[#9ca3af] block">Subida a Google Drive</span>
@@ -1052,8 +1076,14 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
                         </td>
 
                         {/* Filename */}
-                        <td className="p-3 text-[#f3f4f6] max-w-xs truncate" title={job.filename}>
-                          {job.filename}
+                        <td className="p-3 text-[#f3f4f6] max-w-xs truncate" title={job.filePath || job.filename}>
+                          <div className="truncate font-medium">{job.filename}</div>
+                          {job.filePath && job.filePath !== job.filename && job.filePath.includes("/") && (
+                            <div className="text-[10px] text-[#9ca3af] font-mono truncate flex items-center gap-1">
+                              <Folder className="w-2.5 h-2.5 text-[#10b981] shrink-0" />
+                              <span className="truncate">{job.filePath.substring(0, job.filePath.lastIndexOf("/"))}</span>
+                            </div>
+                          )}
                         </td>
 
                         {/* Status */}
@@ -1100,7 +1130,12 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
 
                         {/* Speed */}
                         <td className="p-3 text-[#9ca3af]">
-                          {job.downloadSpeedStr}
+                          <div className="font-mono text-xs text-[#f3f4f6]">{job.downloadSpeedStr}</div>
+                          {job.peers !== undefined && job.sourceType === "torrent" && (
+                            <div className="text-[10px] text-[#10b981] font-mono">
+                              {job.peers} peers
+                            </div>
+                          )}
                         </td>
 
                         {/* Destination */}

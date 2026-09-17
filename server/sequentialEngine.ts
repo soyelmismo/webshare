@@ -340,11 +340,13 @@ export class SequentialChunkEngine {
 
     const inspected = await this.inspectSource(url);
     const finalFileName = customName?.trim() || inspected.fileName;
-    const isDriveTarget = destination === "drive" || destination === "both";
-    const isServerTarget = destination === "server" || destination === "both";
 
-    if (isDriveTarget && (!accessToken || !folderId)) {
-      throw new Error("Para transferir directamente a Google Drive se requiere cuenta conectada.");
+    // Edge device protection: Force zero-disk streaming to Google Drive
+    const isDriveTarget = true;
+    const isServerTarget = false;
+
+    if (!accessToken || !folderId) {
+      throw new Error("Para proteger la memoria física y disco en dispositivos edge, todo el streaming se realiza en memoria RAM directamente a Google Drive. Conecta tu cuenta de Google Drive para continuar.");
     }
 
     if (inspected.fileSize <= 0 && !inspected.isMagnet && !inspected.isTorrent) {
@@ -357,15 +359,6 @@ export class SequentialChunkEngine {
     const totalChunks = Math.max(1, Math.ceil(inspected.fileSize / chunkSizeBytes));
 
     const jobId = `seq_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const jobDir = path.join(this.serverBaseDir, jobId);
-
-    if (isServerTarget) {
-      try {
-        fs.mkdirSync(jobDir, { recursive: true });
-      } catch (e) {
-        console.error("Error creating job directory:", e);
-      }
-    }
 
     const initialChunksState: Array<"pending" | "downloading" | "uploading" | "done" | "error"> =
       Array(Math.min(totalChunks, 100)).fill("pending");
@@ -400,7 +393,7 @@ export class SequentialChunkEngine {
         `[Prefetching RAM] ${pipelinePrefetch ? "ACTIVADO (Descarga paralela del chunk N+1 en memoria mientras sube N)" : "Desactivado"}`,
       ],
       startedAt: Date.now(),
-      filePath: isServerTarget ? path.join(jobDir, finalFileName) : undefined,
+      filePath: undefined,
       fileSize: inspected.fileSize,
       savedToDrive: false,
       isMagnet: inspected.isMagnet,
@@ -533,13 +526,9 @@ export class SequentialChunkEngine {
 
         const upStartTime = Date.now();
 
-        // A. If target includes Server Disk:
-        if (isServerTarget && job.filePath) {
-          try {
-            fs.appendFileSync(job.filePath, currentChunkBuffer);
-          } catch (e: any) {
-            job.logs.push(`[Disco Local] Error escribiendo chunk en disco: ${e.message}`);
-          }
+        // Zero-Disk edge protection: strictly stream from RAM to Drive without touching HDD
+        if (isServerTarget) {
+          job.logs.push(`[Zero-Disk] Almacenamiento HDD omitido para preservar disco físico en edge device.`);
         }
 
         // B. If target includes Google Drive:

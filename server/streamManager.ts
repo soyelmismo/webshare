@@ -1,7 +1,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
-import MemoryChunkStore from "memory-chunk-store";
+import { BoundedMemoryChunkStore } from "./memoryStore.js";
 import { StreamDriveTask, StreamManifestData, DriveSessionAuditResult } from "../src/types.js";
 import {
   inspectAnySource,
@@ -67,13 +67,18 @@ async function getWebTorrentClient(): Promise<any> {
         const wtMod = await import("webtorrent");
         const WebTorrentClass = wtMod.default || wtMod;
         activeWebTorrentClient = new WebTorrentClass({
-          maxConns: 200,
+          maxConns: 50,
           dht: true,
           webSeeds: true,
+          utp: false, // TCP is far more efficient on edge device CPUs
+        });
+        activeWebTorrentClient.on("error", (err: any) => {
+          console.warn("[WebTorrent Client] Error global no fatal:", err?.message || err);
         });
         return activeWebTorrentClient;
       } catch (err) {
         console.warn("Error al inicializar cliente WebTorrent:", err);
+        webTorrentClientPromise = null;
         throw err;
       }
     })();
@@ -170,24 +175,35 @@ function waitForTorrentReady(torrent: any, timeoutMs = 60000): Promise<void> {
 }
 
 /**
- * Safely removes and destroys a torrent from the WebTorrent client.
- * Never throws "No torrent with id ...".
+ * Safely removes and destroys a torrent from the WebTorrent client without throwing.
  */
 async function safeRemoveTorrent(client: any, torrent: any): Promise<void> {
   if (!client || !torrent) return;
   try {
-    if (Array.isArray(client.torrents)) {
-      const idx = client.torrents.indexOf(torrent);
-      if (idx !== -1) {
-        client.torrents.splice(idx, 1);
+    if (torrent.store) {
+      if (typeof torrent.store.destroy === "function") {
+        try { torrent.store.destroy(() => {}); } catch {}
+      } else if (typeof torrent.store.close === "function") {
+        try { torrent.store.close(() => {}); } catch {}
       }
     }
-    if (client.dht && client.dht._tables && torrent.infoHash) {
-      try {
-        client.dht._tables.remove(torrent.infoHash);
-      } catch {}
-    }
-    if (typeof torrent.destroy === "function") {
+    if (typeof client.remove === "function") {
+      await new Promise<void>((resolve) => {
+        try {
+          client.remove(torrent, { destroyStore: true }, () => resolve());
+        } catch {
+          if (typeof torrent.destroy === "function") {
+            try {
+              torrent.destroy({ destroyStore: true }, () => resolve());
+            } catch {
+              resolve();
+            }
+          } else {
+            resolve();
+          }
+        }
+      });
+    } else if (typeof torrent.destroy === "function") {
       await new Promise<void>((resolve) => {
         try {
           torrent.destroy({ destroyStore: true }, () => resolve());
@@ -196,11 +212,8 @@ async function safeRemoveTorrent(client: any, torrent: any): Promise<void> {
         }
       });
     }
-    try {
-      client.emit("remove", torrent);
-    } catch {}
   } catch (e) {
-    console.warn("safeRemoveTorrent warning:", e);
+    console.warn("[StreamManager] safeRemoveTorrent warning:", e);
   }
 }
 
@@ -212,10 +225,121 @@ export class StreamTransferManager {
   private torrentsMap: Map<string, any> = new Map();
   private deletedTaskIds: Set<string> = new Set();
   private descargasFolderCache: Map<string, string> = new Map();
+  private driveFolderCache: Map<string, string> = new Map();
+  private driveFolderInFlight: Map<string, Promise<string>> = new Map();
 
   constructor() {
     this.cleanupDiskCache();
     this.loadTasksFromDisk();
+  }
+
+  /**
+   * Ensures that a nested folder hierarchy exists in Google Drive (e.g. "TorrentName/Season 1/Disc 1").
+   * Searches for existing folders or creates them level-by-level, returning the Google Drive Folder ID
+   * of the deepest leaf directory. Thread-safe with in-memory caching and in-flight promise deduplication.
+   */
+  public async ensureDriveFolderHierarchy(
+    accessToken: string,
+    rootFolderId: string,
+    relativeDirPath: string
+  ): Promise<string> {
+    if (!accessToken) return rootFolderId || "root";
+    const baseId = rootFolderId && rootFolderId.trim() !== "" ? rootFolderId.trim() : "root";
+
+    const segments = relativeDirPath
+      .replace(/\\/g, "/")
+      .split("/")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0 && s !== "." && s !== "..");
+
+    if (segments.length === 0) {
+      return baseId;
+    }
+
+    let currentParentId = baseId;
+    let accumulatedPath = "";
+
+    for (const segment of segments) {
+      accumulatedPath = accumulatedPath ? `${accumulatedPath}/${segment}` : segment;
+      const cacheKey = `${baseId}:${accumulatedPath}`;
+
+      if (this.driveFolderCache.has(cacheKey)) {
+        currentParentId = this.driveFolderCache.get(cacheKey)!;
+        continue;
+      }
+
+      if (this.driveFolderInFlight.has(cacheKey)) {
+        currentParentId = await this.driveFolderInFlight.get(cacheKey)!;
+        continue;
+      }
+
+      const folderCreationPromise = (async () => {
+        // 1. Search if folder already exists in Google Drive under currentParentId
+        const escapedName = segment.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+        const q = `mimeType = 'application/vnd.google-apps.folder' and name = '${escapedName}' and '${currentParentId}' in parents and trashed = false`;
+
+        try {
+          const searchRes = await fetchWithRetry(
+            `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)&pageSize=1`,
+            {
+              headers: { Authorization: `Bearer ${accessToken}` },
+              signal: AbortSignal.timeout(10000),
+            }
+          );
+
+          if (searchRes.ok) {
+            const data = (await searchRes.json().catch(() => ({}))) as { files?: Array<{ id: string }> };
+            if (data.files && data.files.length > 0 && data.files[0].id) {
+              const existingId = data.files[0].id;
+              this.driveFolderCache.set(cacheKey, existingId);
+              return existingId;
+            }
+          }
+        } catch (searchErr: any) {
+          console.warn(`[StreamManager] Error buscando carpeta '${segment}' en Drive:`, searchErr.message);
+        }
+
+        // 2. Create missing folder in Google Drive under currentParentId
+        const createRes = await fetchWithRetry(
+          "https://www.googleapis.com/drive/v3/files?fields=id,name",
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              name: segment,
+              mimeType: "application/vnd.google-apps.folder",
+              parents: currentParentId && currentParentId !== "root" ? [currentParentId] : ["root"],
+            }),
+            signal: AbortSignal.timeout(15000),
+          }
+        );
+
+        if (!createRes.ok) {
+          const errBody = await createRes.text().catch(() => "");
+          throw new Error(`Error al crear carpeta '${segment}' en Google Drive (${createRes.status}): ${errBody}`);
+        }
+
+        const created = (await createRes.json()) as { id?: string };
+        if (!created.id) {
+          throw new Error(`Google Drive no devolvió ID para la carpeta creada '${segment}'.`);
+        }
+
+        this.driveFolderCache.set(cacheKey, created.id);
+        return created.id;
+      })();
+
+      this.driveFolderInFlight.set(cacheKey, folderCreationPromise);
+      try {
+        currentParentId = await folderCreationPromise;
+      } finally {
+        this.driveFolderInFlight.delete(cacheKey);
+      }
+    }
+
+    return currentParentId;
   }
 
   /**
@@ -331,6 +455,64 @@ export class StreamTransferManager {
     }
   }
 
+  /**
+   * Safely destroys and unregisters any active WebTorrent instance associated with a task
+   * to immediately release swarm connections, sockets, and in-memory piece buffers.
+   */
+  public async destroyTorrentForTask(task: StreamDriveTask): Promise<void> {
+    const client = activeWebTorrentClient;
+    const candidates = [
+      task.id,
+      task.sourceUrl,
+      task.torrentBase64,
+      (task as any).infoHash,
+    ].filter(Boolean) as string[];
+
+    const destroyed = new Set<any>();
+
+    for (const key of candidates) {
+      if (this.torrentsMap.has(key)) {
+        const t = this.torrentsMap.get(key);
+        this.torrentsMap.delete(key);
+        if (t && !destroyed.has(t)) {
+          destroyed.add(t);
+          if (t.infoHash) this.torrentsMap.delete(t.infoHash);
+          if (t.magnetURI) this.torrentsMap.delete(t.magnetURI);
+          if (client) {
+            await safeRemoveTorrent(client, t);
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Edge-device RAM defense: Evicts pieces that have already been confirmed by Google Drive.
+   */
+  public evictConfirmedPieces(task: StreamDriveTask, committedBytes: number): void {
+    if (task.sourceType !== "torrent") return;
+    try {
+      const activeTorrent =
+        this.torrentsMap.get(task.id) ||
+        (task.torrentBase64 ? this.torrentsMap.get(task.torrentBase64) : null) ||
+        this.torrentsMap.get(task.sourceUrl);
+      if (!activeTorrent || !activeTorrent.store || !activeTorrent.pieceLength) return;
+
+      const fileOffset = ((activeTorrent.files && activeTorrent.files[0]) as any)?.offset || 0;
+      const confirmedPiece = Math.floor((fileOffset + committedBytes) / activeTorrent.pieceLength);
+
+      if (typeof (activeTorrent.store as any).evictBefore === "function") {
+        (activeTorrent.store as any).evictBefore(confirmedPiece);
+      } else if (Array.isArray((activeTorrent.store as any).chunks)) {
+        for (let p = 0; p < confirmedPiece; p++) {
+          if ((activeTorrent.store as any).chunks[p] !== undefined && (activeTorrent.store as any).chunks[p] !== null) {
+            (activeTorrent.store as any).chunks[p] = null;
+          }
+        }
+      }
+    } catch {}
+  }
+
   private async getOrCreateTorrent(torrentId: string, timeoutMs = 60000, torrentBase64?: string): Promise<any> {
     const client = await getWebTorrentClient();
     if (!client) {
@@ -412,15 +594,17 @@ export class StreamTransferManager {
         }
 
         torrent = client.add(addInput, {
-          store: MemoryChunkStore,
+          store: BoundedMemoryChunkStore,
           deselect: true,
           announce: DEFAULT_TRACKERS,
-          maxWebConns: 16,
+          maxWebConns: 8,
+          uploads: false,
+          strategy: "sequential",
         });
 
         if (torrent) {
           try {
-            torrent.maxConns = 150;
+            torrent.maxConns = 50;
             for (const tr of DEFAULT_TRACKERS) {
               if (typeof torrent.addTracker === "function") {
                 torrent.addTracker(tr);
@@ -458,9 +642,17 @@ export class StreamTransferManager {
       if (torrent.magnetURI) this.torrentsMap.set(torrent.magnetURI, torrent);
     }
 
-    // 4. Ensure metadata is ready
+    // 5. Ensure metadata is ready
     if (!torrent.files || torrent.files.length === 0) {
-      await waitForTorrentReady(torrent, timeoutMs);
+      try {
+        await waitForTorrentReady(torrent, timeoutMs);
+      } catch (err) {
+        await safeRemoveTorrent(client, torrent);
+        this.torrentsMap.delete(torrentId);
+        if (torrent.infoHash) this.torrentsMap.delete(torrent.infoHash);
+        if (torrent.magnetURI) this.torrentsMap.delete(torrent.magnetURI);
+        throw err;
+      }
     }
 
     if (torrent) {
@@ -794,12 +986,34 @@ export class StreamTransferManager {
       );
     }
 
-    const fileName = customFileName || (selectedFilePath ? selectedFilePath.split("/").pop() : undefined) || inspected.fileName;
+    const cleanSelectedPath = selectedFilePath ? selectedFilePath.replace(/\\/g, "/") : "";
+    const fileName =
+      customFileName ||
+      (cleanSelectedPath ? cleanSelectedPath.split("/").pop() : undefined) ||
+      inspected.fileName;
     // Chunk size: multiple of 256KB (262,144 bytes). Default: 16MB (fast for serverless & continuous servers).
     const chunkMB = Math.max(4, Math.min(customChunkSizeMB || 16, 64));
     const chunkSizeBytes = Math.floor((chunkMB * 1024 * 1024) / 262144) * 262144;
 
     const taskId = `stream_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+    // Resolve destination folder hierarchy in Google Drive if selectedFilePath has subdirectories
+    let targetFolderId = folderId && folderId.trim() !== "" ? folderId.trim() : "root";
+    if (cleanSelectedPath && accessToken) {
+      const pathParts = cleanSelectedPath.split("/").filter(Boolean);
+      if (pathParts.length > 1) {
+        const dirHierarchy = pathParts.slice(0, -1).join("/");
+        try {
+          targetFolderId = await this.ensureDriveFolderHierarchy(
+            accessToken,
+            targetFolderId,
+            dirHierarchy
+          );
+        } catch (dirErr: any) {
+          console.warn("[StreamManager] Error asegurando jerarquía de carpetas en Drive:", dirErr.message);
+        }
+      }
+    }
 
     // 1. Initialize Google Drive resumable upload session (deferred if queued / skipSessionInit)
     let sessionUri = "";
@@ -809,7 +1023,7 @@ export class StreamTransferManager {
       try {
         sessionUri = await this.initDriveResumableUpload(
           accessToken,
-          folderId,
+          targetFolderId,
           fileName,
           inspected.fileSize
         );
@@ -834,7 +1048,8 @@ export class StreamTransferManager {
       chunkSizeBytes,
       chunkSizeFormatted: `${chunkMB} MB`,
       resumableUploadUrl: sessionUri,
-      driveFolderId: folderId,
+      driveFolderId: targetFolderId,
+      rootFolderId: folderId && folderId.trim() !== "" ? folderId.trim() : "root",
       uploadedBytes: 0,
       uploadedBytesFormatted: "0 Bytes",
       currentChunkIndex: 0,
@@ -843,11 +1058,11 @@ export class StreamTransferManager {
       speedMBs: 0,
       status: taskStatus,
       startedAt: Date.now(),
-      selectedFilePath,
+      selectedFilePath: cleanSelectedPath || undefined,
       queueIndex,
       totalInBatch,
       batchId,
-    } as any;
+    };
 
     this.tasks.set(taskId, task);
     this.saveTasksToDisk();
@@ -855,7 +1070,7 @@ export class StreamTransferManager {
     // 2. Initial manifest write to Drive if session was initialized
     if (sessionUri) {
       try {
-        const manifestId = await this.saveManifestToDrive(accessToken, folderId, {
+        const manifestId = await this.saveManifestToDrive(accessToken, targetFolderId, {
           version: 1,
           taskId,
           accountEmail: accountEmail || undefined,
@@ -867,14 +1082,15 @@ export class StreamTransferManager {
           fileSize: inspected.fileSize,
           chunkSizeBytes,
           resumableUploadUrl: sessionUri,
-          driveFolderId: folderId,
+          driveFolderId: targetFolderId,
+          rootFolderId: task.rootFolderId,
           uploadedBytes: 0,
           currentChunkIndex: 0,
           totalChunks,
           status: taskStatus,
           startedAt: task.startedAt,
           updatedAt: Date.now(),
-          selectedFilePath,
+          selectedFilePath: task.selectedFilePath,
           queueIndex,
           totalInBatch,
           batchId,
@@ -1000,6 +1216,27 @@ export class StreamTransferManager {
     if (!task.resumableUploadUrl) {
       try {
         console.log(`[StreamManager] Inicializando sesión de Google Drive bajo demanda para tarea en cola: ${task.fileName}`);
+
+        // Ensure nested folder hierarchy exists in Drive if not yet resolved
+        if (task.selectedFilePath && accessToken) {
+          const cleanPath = task.selectedFilePath.replace(/\\/g, "/");
+          const pathParts = cleanPath.split("/").filter(Boolean);
+          if (pathParts.length > 1) {
+            const dirHierarchy = pathParts.slice(0, -1).join("/");
+            const baseFolder = task.rootFolderId || activeFolderId || "root";
+            try {
+              const targetFolderId = await this.ensureDriveFolderHierarchy(
+                accessToken,
+                baseFolder,
+                dirHierarchy
+              );
+              task.driveFolderId = targetFolderId;
+            } catch (dirErr: any) {
+              console.warn("[StreamManager] Error asegurando jerarquía en processNextChunk:", dirErr.message);
+            }
+          }
+        }
+
         const sessionUri = await this.initDriveResumableUpload(
           accessToken,
           task.driveFolderId,
@@ -1022,6 +1259,7 @@ export class StreamTransferManager {
           chunkSizeBytes: task.chunkSizeBytes,
           resumableUploadUrl: sessionUri,
           driveFolderId: task.driveFolderId,
+          rootFolderId: task.rootFolderId,
           uploadedBytes: task.uploadedBytes,
           currentChunkIndex: task.currentChunkIndex,
           totalChunks: task.totalChunks,
@@ -1132,15 +1370,34 @@ export class StreamTransferManager {
         task.speedMBs = speedMBs;
         (task as any).lastChunkAt = now;
 
+        // Immediate RAM optimization for edge devices: evict confirmed pieces
+        this.evictConfirmedPieces(task, end);
+
+        // Update live torrent swarm telemetry if applicable
+        if (task.sourceType === "torrent") {
+          const activeTorrent =
+            this.torrentsMap.get(task.id) ||
+            (task.torrentBase64 ? this.torrentsMap.get(task.torrentBase64) : null) ||
+            this.torrentsMap.get(task.sourceUrl);
+          if (activeTorrent) {
+            task.torrentSpeedMBs = Number(((activeTorrent.downloadSpeed || 0) / (1024 * 1024)).toFixed(1));
+            task.peers = typeof activeTorrent.numPeers === "number" ? activeTorrent.numPeers : 0;
+          }
+        }
+
         if (driveRes.status === 200 || driveRes.status === 201 || end >= task.fileSize) {
           const resultData = driveRes.status !== 308 ? await driveRes.json().catch(() => ({})) : {};
           task.status = "completed";
           task.progressPercent = 100;
           task.speedMBs = 0;
+          task.torrentSpeedMBs = 0;
           task.completedAt = Date.now();
           if (resultData.id) task.finalDriveFileId = resultData.id;
           if (resultData.md5Checksum) task.md5Checksum = resultData.md5Checksum;
           if (resultData.webViewLink) task.webViewLink = resultData.webViewLink;
+
+          // Free all swarm sockets, wires, and chunk memory immediately upon completion
+          await this.destroyTorrentForTask(task);
         }
 
         this.saveTasksToDisk();
@@ -1202,6 +1459,26 @@ export class StreamTransferManager {
     const abortController = new AbortController();
     this.abortControllers.set(taskId, abortController);
 
+    // Periodic telemetry ticker for torrent swarm speeds and peers
+    let statsTimer: NodeJS.Timeout | null = null;
+    if (task.sourceType === "torrent") {
+      statsTimer = setInterval(async () => {
+        try {
+          const client = activeWebTorrentClient;
+          if (client) {
+            const torrent =
+              this.torrentsMap.get(taskId) ||
+              (task.torrentBase64 ? this.torrentsMap.get(task.torrentBase64) : null) ||
+              this.torrentsMap.get(task.sourceUrl);
+            if (torrent) {
+              task.torrentSpeedMBs = Number(((torrent.downloadSpeed || 0) / (1024 * 1024)).toFixed(1));
+              task.peers = typeof torrent.numPeers === "number" ? torrent.numPeers : 0;
+            }
+          }
+        } catch {}
+      }, 1000);
+    }
+
     try {
       // Check current committed offset on Google Drive
       const committed = await this.queryDriveSessionCommittedBytes(
@@ -1213,6 +1490,7 @@ export class StreamTransferManager {
         task.uploadedBytesFormatted = formatBytes(committed);
         task.currentChunkIndex = Math.floor(committed / task.chunkSizeBytes);
         task.progressPercent = Math.min(100, Math.round((committed / task.fileSize) * 100));
+        this.evictConfirmedPieces(task, committed);
       }
 
       while (task.uploadedBytes < task.fileSize && task.status === "streaming") {
@@ -1230,8 +1508,12 @@ export class StreamTransferManager {
         this.saveTasksToDisk();
       }
     } finally {
+      if (statsTimer) clearInterval(statsTimer);
       this.abortControllers.delete(taskId);
       this.saveTasksToDisk();
+      if (task.status === "completed" || task.status === "error" || task.status === "paused") {
+        await this.destroyTorrentForTask(task);
+      }
     }
   }
 
@@ -1390,9 +1672,18 @@ export class StreamTransferManager {
     // Find target file (matching selectedFilePath or largest file)
     let targetFile = torrent.files[0];
     if (selectedFilePath) {
+      const cleanTarget = selectedFilePath.replace(/\\/g, "/");
       targetFile =
-        torrent.files.find((f: any) => f.path === selectedFilePath || f.name === selectedFilePath) ||
-        targetFile;
+        torrent.files.find((f: any) => {
+          const fPath = (f.path || "").replace(/\\/g, "/");
+          return (
+            fPath === cleanTarget ||
+            f.name === cleanTarget ||
+            fPath.endsWith("/" + cleanTarget) ||
+            cleanTarget.endsWith("/" + fPath) ||
+            fPath.split("/").pop() === cleanTarget.split("/").pop()
+          );
+        }) || targetFile;
     } else {
       for (const f of torrent.files) {
         if (f.length > (targetFile ? targetFile.length : 0)) {
@@ -1463,7 +1754,25 @@ export class StreamTransferManager {
         if (signal) {
           signal.removeEventListener("abort", onAbort);
         }
-        resolve(Buffer.concat(chunks));
+        const resultBuf = Buffer.concat(chunks);
+        chunks.length = 0; // release chunk array buffers immediately
+
+        // Edge device RAM optimization: Evict pieces behind this range
+        if (torrent.store) {
+          const fileOffset = (targetFile as any).offset || 0;
+          const currentStartPiece = Math.floor((fileOffset + start) / torrent.pieceLength);
+          if (typeof (torrent.store as any).evictBefore === "function") {
+            (torrent.store as any).evictBefore(currentStartPiece);
+          } else if (Array.isArray((torrent.store as any).chunks)) {
+            for (let p = 0; p < currentStartPiece; p++) {
+              if ((torrent.store as any).chunks[p] !== undefined && (torrent.store as any).chunks[p] !== null) {
+                (torrent.store as any).chunks[p] = null;
+              }
+            }
+          }
+        }
+
+        resolve(resultBuf);
       });
       stream.on("error", (err: any) => {
         if (timer) {
@@ -1487,11 +1796,13 @@ export class StreamTransferManager {
 
     task.status = "paused";
     task.speedMBs = 0;
+    task.torrentSpeedMBs = 0;
     const controller = this.abortControllers.get(taskId);
     if (controller) {
       controller.abort();
       this.abortControllers.delete(taskId);
     }
+    await this.destroyTorrentForTask(task);
 
     // Query committed bytes in Drive to keep local task synchronized with Google's cloud
     try {
@@ -1743,6 +2054,7 @@ export class StreamTransferManager {
         controller.abort();
         this.abortControllers.delete(taskId);
       }
+      await this.destroyTorrentForTask(task);
       this.tasks.delete(taskId);
       this.saveTasksToDisk();
       this.cleanupDiskCache();
@@ -1927,7 +2239,8 @@ export class StreamTransferManager {
           chunkSizeBytes: manifest.chunkSizeBytes,
           chunkSizeFormatted: `${Math.round(manifest.chunkSizeBytes / (1024 * 1024))} MB`,
           resumableUploadUrl: manifest.resumableUploadUrl,
-          driveFolderId: manifest.driveFolderId || folderId,
+          driveFolderId: manifest.driveFolderId || folderId || "root",
+          rootFolderId: manifest.rootFolderId || folderId || "root",
           manifestFileId: file.id,
           uploadedBytes: actualCommitted,
           uploadedBytesFormatted: formatBytes(actualCommitted),

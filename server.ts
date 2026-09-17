@@ -1347,7 +1347,7 @@ app.use(express.json({ limit: "50mb" }));
   }
 
   // 1. List files in a server directory
-  app.get("/api/fs/server/list", (req, res) => {
+  app.get(["/api/fs/server/list", "/api/fs/list"], (req, res) => {
     let targetDir = (req.query.dir as string) || SEQUENTIAL_BASE_DIR;
     const isFlat = req.query.flatten === "true";
     targetDir = path.resolve(targetDir);
@@ -1498,11 +1498,12 @@ app.use(express.json({ limit: "50mb" }));
     }
   });
 
-  // 2. Delete file(s) or folder(s) from server
-  app.delete("/api/fs/server/delete", (req, res) => {
-    const { paths: targetPaths } = req.body;
-    if (!Array.isArray(targetPaths) || targetPaths.length === 0) {
-      return res.status(400).json({ error: "Se requiere un array 'paths' de rutas a eliminar." });
+  // 2. Delete file(s) or folder(s) from server (Supports DELETE and POST, aliases /api/fs/delete and /api/fs/server/delete)
+  const handleFsDelete = (req: express.Request, res: express.Response) => {
+    const rawPaths = req.body.paths || (req.body.filePath ? [req.body.filePath] : []);
+    const targetPaths: string[] = Array.isArray(rawPaths) ? rawPaths : [];
+    if (targetPaths.length === 0) {
+      return res.status(400).json({ error: "Se requiere un array 'paths' o 'filePath' de rutas a eliminar." });
     }
 
     const deleted: string[] = [];
@@ -1543,7 +1544,10 @@ app.use(express.json({ limit: "50mb" }));
       deleted,
       errors,
     });
-  });
+  };
+
+  app.delete(["/api/fs/server/delete", "/api/fs/delete"], handleFsDelete);
+  app.post(["/api/fs/server/delete", "/api/fs/delete"], handleFsDelete);
 
   // 3. Rename file or folder on server
   app.post("/api/fs/server/rename", (req, res) => {
@@ -1623,12 +1627,13 @@ app.use(express.json({ limit: "50mb" }));
     stream.pipe(res);
   });
 
-  // 5. Transfer file from Server to Google Drive (Copy or Move)
-  app.post("/api/fs/server/transfer", async (req, res) => {
-    const { filePath, fileName, accessToken, folderId, mode = "copy" } = req.body;
-    if (!filePath || !accessToken || !folderId) {
+  // 5. Transfer file from Server to Google Drive (Copy or Move, aliases /api/fs/server/transfer and /api/fs/upload-to-drive)
+  app.post(["/api/fs/server/transfer", "/api/fs/upload-to-drive"], async (req, res) => {
+    const { filePath, fileName, accessToken, mode = "copy" } = req.body;
+    const folderId = req.body.folderId || "root";
+    if (!filePath || !accessToken) {
       return res.status(400).json({
-        error: "Se requiere filePath, accessToken y folderId para realizar la transferencia.",
+        error: "Se requiere filePath y accessToken para realizar la transferencia.",
       });
     }
 
@@ -1883,8 +1888,8 @@ app.use(express.json({ limit: "50mb" }));
         tasks = await streamManager.recoverFromDriveFolder(accessToken, folderId, accountEmail);
       }
 
-      // Serverless progress pump: process chunks continuously for up to 5s per polling request to achieve maximum speed
-      if (accessToken && tasks.length > 0) {
+      // Serverless progress pump: process chunks continuously for up to 5s per polling request on Vercel
+      if (Boolean(process.env.VERCEL) && accessToken && tasks.length > 0) {
         const endTime = Date.now() + 5000;
         for (const t of tasks) {
           if (t.status === "streaming" || t.status === "queued") {

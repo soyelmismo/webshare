@@ -34,10 +34,18 @@ export function decodeTorrentBencode(buf: Buffer): {
   infoHash: string;
   rawInfoBuffer: Buffer | null;
 } {
+  if (!buf || !Buffer.isBuffer(buf) || buf.length === 0) {
+    throw new Error("Buffer de torrent vacío o inválido.");
+  }
+
   let pos = 0;
   let rawInfoBuffer: Buffer | null = null;
+  const MAX_RECURSION_DEPTH = 64;
 
-  function parseNext(): any {
+  function parseNext(depth = 0): any {
+    if (depth > MAX_RECURSION_DEPTH) {
+      throw new Error("Estructura de torrent demasiado anidada (posible ataque DoS).");
+    }
     if (pos >= buf.length) {
       throw new Error("Formato de archivo .torrent inválido o incompleto.");
     }
@@ -50,13 +58,15 @@ export function decodeTorrentBencode(buf: Buffer): {
       if (end === -1) throw new Error("Entero bencode no terminado.");
       const numStr = buf.toString("ascii", pos, end);
       pos = end + 1;
-      return parseInt(numStr, 10);
+      const parsed = parseInt(numStr, 10);
+      if (isNaN(parsed)) throw new Error("Entero bencode no válido: " + numStr);
+      return parsed;
     } else if (byte === 108) {
       // "l" -> List: l<items>e
       pos++;
       const list: any[] = [];
       while (pos < buf.length && buf[pos] !== 101) {
-        list.push(parseNext());
+        list.push(parseNext(depth + 1));
       }
       pos++; // skip "e"
       return list;
@@ -65,13 +75,13 @@ export function decodeTorrentBencode(buf: Buffer): {
       pos++;
       const dict: Record<string, any> = {};
       while (pos < buf.length && buf[pos] !== 101) {
-        const keyVal = parseNext();
+        const keyVal = parseNext(depth + 1);
         const keyStr = Buffer.isBuffer(keyVal)
           ? keyVal.toString("utf8")
           : String(keyVal);
         const isInfoKey = keyStr === "info";
         const valStart = pos;
-        const childVal = parseNext();
+        const childVal = parseNext(depth + 1);
         if (isInfoKey && !rawInfoBuffer) {
           rawInfoBuffer = buf.subarray(valStart, pos);
         }
@@ -84,6 +94,9 @@ export function decodeTorrentBencode(buf: Buffer): {
       const colon = buf.indexOf(58, pos); // ":"
       if (colon === -1) throw new Error("Falta ':' en longitud de cadena bencode.");
       const len = parseInt(buf.toString("ascii", pos, colon), 10);
+      if (isNaN(len) || len < 0 || colon + 1 + len > buf.length) {
+        throw new Error(`Longitud de cadena bencode fuera de límites (${len})`);
+      }
       pos = colon + 1;
       const data = buf.subarray(pos, pos + len);
       pos += len;
@@ -95,7 +108,7 @@ export function decodeTorrentBencode(buf: Buffer): {
     );
   }
 
-  const root = parseNext();
+  const root = parseNext(0);
   const infoHash = rawInfoBuffer
     ? crypto.createHash("sha1").update(rawInfoBuffer).digest("hex")
     : "";
@@ -116,6 +129,10 @@ export function parseTorrentBuffer(buf: Buffer): InspectedFileInfo {
   if (info.files && Array.isArray(info.files)) {
     let total = 0;
     let largest = { name: "", length: 0 };
+    const rootName = Buffer.isBuffer(info.name)
+      ? info.name.toString("utf8")
+      : String(info.name || "").trim();
+
     for (const f of info.files) {
       const len = typeof f.length === "number" ? f.length : 0;
       total += len;
@@ -123,16 +140,17 @@ export function parseTorrentBuffer(buf: Buffer): InspectedFileInfo {
         ? f.path.map((p: any) => (Buffer.isBuffer(p) ? p.toString("utf8") : String(p)))
         : [];
       const fName = pathParts[pathParts.length - 1] || "file";
-      const fullPath = pathParts.join("/");
+      const relPath = pathParts.join("/");
+      let fullPath = relPath;
+      if (rootName && !relPath.startsWith(rootName + "/")) {
+        fullPath = `${rootName}/${relPath}`;
+      }
       files.push({ name: fName, length: len, path: fullPath });
       if (len > largest.length) {
         largest = { name: fName, length: len };
       }
     }
     fileSize = total;
-    const rootName = Buffer.isBuffer(info.name)
-      ? info.name.toString("utf8")
-      : String(info.name || "");
     fileName = largest.name || rootName || "archivo_torrent.iso";
   } else if (info.length !== undefined) {
     fileSize =
@@ -212,6 +230,28 @@ export function parseTorrentBuffer(buf: Buffer): InspectedFileInfo {
 }
 
 /**
+ * Helper to decode 32-character base32 BitTorrent info hashes to 40-character hex.
+ */
+export function base32ToHex(base32: string): string {
+  const alphabet = "abcdefghijklmnopqrstuvwxyz234567";
+  let bits = 0;
+  let value = 0;
+  let hex = "";
+  for (let i = 0; i < base32.length; i++) {
+    const val = alphabet.indexOf(base32[i].toLowerCase());
+    if (val === -1) return base32; // Invalid base32 character, return as is
+    value = (value << 5) | val;
+    bits += 5;
+    if (bits >= 8) {
+      const byte = (value >>> (bits - 8)) & 255;
+      hex += byte.toString(16).padStart(2, "0");
+      bits -= 8;
+    }
+  }
+  return hex.length === 40 ? hex : base32;
+}
+
+/**
  * Concurrently tests a list of WebSeed mirrors and returns the fastest working HTTP mirror URL.
  */
 export async function findFastestWebSeedMirror(
@@ -222,6 +262,7 @@ export async function findFastestWebSeedMirror(
   if (!seeds || seeds.length === 0) return null;
   const candidates = seeds.slice(0, maxToTest);
   const controller = new AbortController();
+  let timerId: NodeJS.Timeout | null = null;
 
   const testSingleMirror = async (mirrorUrl: string): Promise<string> => {
     try {
@@ -233,7 +274,6 @@ export async function findFastestWebSeedMirror(
         signal: controller.signal,
       });
       if (res.status === 206 || res.status === 200) {
-        controller.abort();
         return mirrorUrl;
       }
     } catch {
@@ -243,18 +283,23 @@ export async function findFastestWebSeedMirror(
   };
 
   try {
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("Timeout")), timeoutMs)
-    );
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timerId = setTimeout(() => reject(new Error("Timeout")), timeoutMs);
+    });
     const probePromise = Promise.any(candidates.map(testSingleMirror));
-    return await Promise.race([probePromise, timeoutPromise]);
+    const winner = await Promise.race([probePromise, timeoutPromise]);
+    controller.abort();
+    return winner;
   } catch {
     return null;
+  } finally {
+    if (timerId) clearTimeout(timerId);
+    controller.abort();
   }
 }
 
 /**
- * Parses magnet link parameters.
+ * Parses magnet link parameters with support for hex (40 chars) and base32 (32 chars) info hashes.
  */
 export function parseMagnetUri(uri: string): {
   infoHash: string;
@@ -275,7 +320,12 @@ export function parseMagnetUri(uri: string): {
       if (!k) continue;
 
       if (k === "xt" && v.startsWith("urn:btih:")) {
-        infoHash = v.replace("urn:btih:", "").toLowerCase().trim();
+        const rawHash = v.replace("urn:btih:", "").toLowerCase().trim();
+        if (rawHash.length === 32) {
+          infoHash = base32ToHex(rawHash);
+        } else {
+          infoHash = rawHash;
+        }
       } else if (k === "dn") {
         try {
           name = decodeURIComponent(v.replace(/\+/g, " "));

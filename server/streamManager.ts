@@ -844,16 +844,21 @@ export class StreamTransferManager {
       }
 
       const fileOffset = (targetFile as any)?.offset || 0;
-      const confirmedPiece = Math.floor((fileOffset + committedBytes) / activeTorrent.pieceLength);
+      const fileLength = Number(targetFile?.length) || task.fileSize || 0;
+      const rawStore = (activeTorrent.store as any).store || activeTorrent.store;
 
-      if (typeof (activeTorrent.store as any).evictBefore === "function") {
-        (activeTorrent.store as any).evictBefore(confirmedPiece);
-      } else if (Array.isArray((activeTorrent.store as any).chunks)) {
-        for (let p = 0; p < confirmedPiece; p++) {
-          if ((activeTorrent.store as any).chunks[p] !== undefined && (activeTorrent.store as any).chunks[p] !== null) {
-            (activeTorrent.store as any).chunks[p] = null;
-          }
+      if (rawStore && typeof rawStore.setProtectedRange === "function") {
+        if (committedBytes >= fileLength) {
+          rawStore.removeProtectedRange(task.id);
+        } else {
+          const startPiece = Math.max(0, Math.floor((fileOffset + committedBytes) / activeTorrent.pieceLength) - 1);
+          const endPiece = Math.floor((fileOffset + Math.min(fileLength, committedBytes + task.chunkSizeBytes * 3)) / activeTorrent.pieceLength) + 1;
+          rawStore.setProtectedRange(task.id, startPiece, endPiece);
         }
+      }
+
+      if (rawStore && typeof rawStore.evictUnprotected === "function") {
+        rawStore.evictUnprotected(activeTorrent);
       }
     } catch {}
   }
@@ -1004,6 +1009,19 @@ export class StreamTransferManager {
       this.torrentsMap.set(torrentId, torrent);
       if (torrent.infoHash) this.torrentsMap.set(torrent.infoHash, torrent);
       if (torrent.magnetURI) this.torrentsMap.set(torrent.magnetURI, torrent);
+
+      if (torrent.store) {
+        if (torrent.length) {
+          torrent.store.length = torrent.length;
+          if (torrent.store.store) {
+            torrent.store.store.length = torrent.length;
+            if (torrent.pieceLength) {
+              torrent.store.store.lastChunkLength = (torrent.length % torrent.pieceLength) || torrent.pieceLength;
+              torrent.store.store.lastChunkIndex = Math.ceil(torrent.length / torrent.pieceLength) - 1;
+            }
+          }
+        }
+      }
     }
 
     return torrent;
@@ -1413,6 +1431,21 @@ export class StreamTransferManager {
           `No se pudieron obtener los metadatos del torrent desde la red P2P (${err.message}). Verifica que el torrent o magnet tenga seeders activos o sube el archivo .torrent directamente.`
         );
       }
+    }
+
+    // If it's a multi-file torrent and no specific file was selected, automatically queue as batch
+    if (inspected.files && inspected.files.length > 1 && !selectedFilePath) {
+      console.log(`[StreamManager] Multi-file torrent (${inspected.files.length} archivos) recibido en startStreamTask sin selectedFilePath. Delegando automáticamente a startBatchStreamTasks.`);
+      const batchResult = await this.startBatchStreamTasks({
+        sourceUrl,
+        accessToken,
+        folderId,
+        accountEmail,
+        customChunkSizeMB,
+        torrentBase64: inspected.torrentBase64 || torrentBase64,
+        files: inspected.files,
+      });
+      return batchResult.tasks[0];
     }
 
     if (selectedFileSize && selectedFileSize > 0) {
@@ -2298,11 +2331,16 @@ export class StreamTransferManager {
       throw new Error("No se encontró el archivo dentro del torrent.");
     }
 
+    const fileLength = Number(targetFile.length) || Number(selectedFileSize) || 0;
+    const clampedEnd = fileLength > 0 ? Math.min(end, fileLength) : end;
+    const totalNeeded = clampedEnd - start;
+    if (totalNeeded <= 0) return Buffer.alloc(0);
+
     // Prioritize pieces for this exact slice across connected peers in the swarm
     if (torrent.pieceLength && typeof torrent.critical === "function") {
       const fileOffset = (targetFile as any).offset || 0;
       const globalStart = fileOffset + start;
-      const globalEnd = fileOffset + end - 1;
+      const globalEnd = fileOffset + clampedEnd - 1;
       const startPiece = Math.floor(globalStart / torrent.pieceLength);
       const endPiece = Math.floor(globalEnd / torrent.pieceLength);
       try {
@@ -2310,19 +2348,20 @@ export class StreamTransferManager {
       } catch {}
     }
 
-    // Inform bounded memory store of the minimum active piece so active pieces are never evicted
-    if (torrent.store && typeof (torrent.store as any).evictBefore === "function") {
+    // Inform bounded memory store of the protected active piece range for this task
+    const rawStore = (torrent.store as any)?.store || torrent.store;
+    if (rawStore && typeof rawStore.setProtectedRange === "function") {
       const fileOffset = (targetFile as any).offset || 0;
-      const currentStartPiece = Math.floor((fileOffset + start) / torrent.pieceLength);
-      (torrent.store as any).evictBefore(currentStartPiece);
+      const startPiece = Math.max(0, Math.floor((fileOffset + start) / torrent.pieceLength) - 1);
+      const endPiece = Math.floor((fileOffset + clampedEnd) / torrent.pieceLength) + 1;
+      rawStore.setProtectedRange(selectedFilePath || targetFile.path || torrentId, startPiece, endPiece);
     }
 
-    const totalNeeded = end - start;
     const collectedChunks: Buffer[] = [];
     let currentByteOffset = start;
     let attempts = 0;
 
-    while (currentByteOffset < end && attempts < 10) {
+    while (currentByteOffset < clampedEnd && attempts < 10) {
       if (signal?.aborted) {
         throw new Error("Transmisión cancelada o pausada.");
       }
@@ -2332,7 +2371,7 @@ export class StreamTransferManager {
         torrent,
         targetFile,
         currentByteOffset,
-        end,
+        clampedEnd,
         signal
       );
 
@@ -2363,10 +2402,21 @@ export class StreamTransferManager {
     end: number,
     signal?: AbortSignal
   ): Promise<Buffer> {
+    const fileLength = Number(targetFile.length) || 0;
+    const clampedEnd = fileLength > 0 ? Math.min(end, fileLength) : end;
+    if (start >= clampedEnd) {
+      return Promise.resolve(Buffer.alloc(0));
+    }
+
+    if (torrent.store) {
+      if (!torrent.store.length && torrent.length) torrent.store.length = torrent.length;
+      if (torrent.store.store && !torrent.store.store.length) torrent.store.store.length = torrent.length;
+    }
+
     if (torrent.pieceLength && typeof torrent.critical === "function") {
       const fileOffset = (targetFile as any).offset || 0;
       const globalStart = fileOffset + start;
-      const globalEnd = fileOffset + end - 1;
+      const globalEnd = fileOffset + clampedEnd - 1;
       const startPiece = Math.floor(globalStart / torrent.pieceLength);
       const endPiece = Math.floor(globalEnd / torrent.pieceLength);
       try {
@@ -2375,7 +2425,7 @@ export class StreamTransferManager {
     }
 
     return new Promise((resolve, reject) => {
-      const stream = targetFile.createReadStream({ start, end: end - 1 });
+      const stream = targetFile.createReadStream({ start, end: clampedEnd - 1 });
       const chunks: Buffer[] = [];
       let timer: NodeJS.Timeout | null = setTimeout(() => {
         if (typeof (stream as any).destroy === "function") {
@@ -2385,7 +2435,7 @@ export class StreamTransferManager {
         }
         reject(
           new Error(
-            `Tiempo de espera agotado descargando segmento del torrent (${formatBytes(start)} - ${formatBytes(end)}). Verifica que el torrent tenga seeders activos.`
+            `Tiempo de espera agotado descargando segmento del torrent (${formatBytes(start)} - ${formatBytes(clampedEnd)}). Verifica que el torrent tenga seeders activos.`
           )
         );
       }, 90000);

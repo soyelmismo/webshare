@@ -297,43 +297,63 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
       const targetFolder = selectedFolderId || propFolderId || currentSession?.dedicatedFolderId || currentSession?.folder?.id || "root";
       const activeAccountEmail = currentSession?.activeAccount?.email || currentSession?.user?.email || undefined;
 
-      // If multi-file torrent and multiple files selected
-      if (sourceInfo?.files && sourceInfo.files.length > 1 && selectedFilePaths.size > 0) {
-        const filesToQueue = sourceInfo.files.filter((f) => selectedFilePaths.has(f.path));
-        const batchRes = await startBatchStreamJob({
-          sourceUrl: url.trim() || `torrent_batch_${filesToQueue.length}`,
-          folderId: targetFolder,
-          accountEmail: activeAccountEmail,
-          accessToken: activeTokenStr,
-          chunkSizeMB: Number(chunkSizeMB) || 25,
-          torrentBase64: torrentBase64 || undefined,
-          files: filesToQueue.map((f) => ({ path: f.path, length: f.length, name: f.name })),
-        });
-        if (batchRes.tasks && batchRes.tasks.length > 0) {
-          setActiveTaskId(batchRes.tasks[0].id);
-        }
-      } else {
-        // Single file / direct download
-        const singleFile =
-          sourceInfo?.files && selectedFilePaths.size === 1
-            ? sourceInfo.files.find((f) => selectedFilePaths.has(f.path)) || sourceInfo.files[0]
-            : sourceInfo?.files && sourceInfo.files.length === 1
-            ? sourceInfo.files[0]
-            : undefined;
-
-        const result = await startStreamJob({
-          sourceUrl: url.trim(),
-          targetFilename: customFilename.trim() || (singleFile ? singleFile.name : undefined),
-          folderId: targetFolder,
-          accountEmail: activeAccountEmail,
-          accessToken: activeTokenStr,
-          chunkSizeMB: Number(chunkSizeMB) || 25,
-          torrentBase64: torrentBase64 || undefined,
-          selectedFilePath: singleFile?.path,
-          selectedFileSize: singleFile?.length,
-        });
-        setActiveTaskId(result.task.id);
+      let currentSourceInfo = sourceInfo;
+      const isTorrentSource = Boolean(torrentBase64) || url.startsWith("magnet:") || url.toLowerCase().includes(".torrent");
+      if (!currentSourceInfo && isTorrentSource) {
+        try {
+          currentSourceInfo = await inspectStreamUrl(url.trim(), torrentBase64 || undefined);
+          setSourceInfo(currentSourceInfo);
+          if (currentSourceInfo?.files && currentSourceInfo.files.length > 0) {
+            setSelectedFilePaths(new Set(currentSourceInfo.files.map((f) => f.path)));
+          }
+        } catch {}
       }
+
+      // If multi-file torrent, queue all selected files (or all files if none explicitly filtered)
+      if (currentSourceInfo?.files && currentSourceInfo.files.length > 1) {
+        const filesToQueue = selectedFilePaths.size > 0
+          ? currentSourceInfo.files.filter((f) => selectedFilePaths.has(f.path))
+          : currentSourceInfo.files;
+
+        if (filesToQueue.length > 0) {
+          const batchRes = await startBatchStreamJob({
+            sourceUrl: url.trim() || `torrent_batch_${filesToQueue.length}`,
+            folderId: targetFolder,
+            accountEmail: activeAccountEmail,
+            accessToken: activeTokenStr,
+            chunkSizeMB: Number(chunkSizeMB) || 25,
+            torrentBase64: torrentBase64 || undefined,
+            files: filesToQueue.map((f) => ({ path: f.path, length: f.length, name: f.name })),
+          });
+          if (batchRes.tasks && batchRes.tasks.length > 0) {
+            setActiveTaskId(batchRes.tasks[0].id);
+          }
+          const list = await getStreamTasks();
+          setTasks(list);
+          return;
+        }
+      }
+
+      // Single file / direct download
+      const singleFile =
+        currentSourceInfo?.files && selectedFilePaths.size === 1
+          ? currentSourceInfo.files.find((f) => selectedFilePaths.has(f.path)) || currentSourceInfo.files[0]
+          : currentSourceInfo?.files && currentSourceInfo.files.length === 1
+          ? currentSourceInfo.files[0]
+          : undefined;
+
+      const result = await startStreamJob({
+        sourceUrl: url.trim(),
+        targetFilename: customFilename.trim() || (singleFile ? singleFile.name : undefined),
+        folderId: targetFolder,
+        accountEmail: activeAccountEmail,
+        accessToken: activeTokenStr,
+        chunkSizeMB: Number(chunkSizeMB) || 25,
+        torrentBase64: torrentBase64 || undefined,
+        selectedFilePath: singleFile?.path,
+        selectedFileSize: singleFile?.length,
+      });
+      setActiveTaskId(result.task.id);
 
       const list = await getStreamTasks();
       setTasks(list);

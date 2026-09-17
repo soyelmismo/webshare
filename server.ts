@@ -1881,6 +1881,10 @@ app.use(express.json({ limit: "50mb" }));
       const folderId = (req.query.folderId as string) || "";
       const accountEmail = (req.query.accountEmail as string) || "";
 
+      if (accessToken) {
+        streamManager.recordAccountToken(accessToken, accountEmail);
+      }
+
       let tasks = streamManager.getTasks(folderId, accountEmail);
 
       // On serverless / cold start, if memory is empty and access token is present, auto-recover from Drive
@@ -2029,6 +2033,39 @@ app.use(express.json({ limit: "50mb" }));
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Error al recuperar tareas desde Drive" });
     }
+  });
+
+  // --- BITTORRENT-STYLE QUEUE MANAGEMENT ENDPOINTS ---
+  app.get("/api/stream/queue/config", (req, res) => {
+    res.json({
+      maxConcurrentDownloads: streamManager.getMaxConcurrentDownloads(),
+    });
+  });
+
+  app.post("/api/stream/queue/config", (req, res) => {
+    const { maxConcurrentDownloads } = req.body;
+    if (typeof maxConcurrentDownloads === "number") {
+      streamManager.setMaxConcurrentDownloads(maxConcurrentDownloads);
+    }
+    res.json({
+      success: true,
+      maxConcurrentDownloads: streamManager.getMaxConcurrentDownloads(),
+    });
+  });
+
+  app.post("/api/stream/queue/reorder", (req, res) => {
+    const { taskId, action, accessToken, accountEmail } = req.body;
+    if (!taskId || !action) {
+      return res.status(400).json({ error: "Se requiere 'taskId' y 'action' (up|down|top|bottom)" });
+    }
+    if (accessToken) {
+      streamManager.recordAccountToken(accessToken, accountEmail);
+    }
+    const success = streamManager.reorderQueueTask(taskId, action);
+    res.json({
+      success,
+      tasks: streamManager.getTasks(),
+    });
   });
 
   // --- RAW SPEED TEST WITH BANDWIDTH THROTTLER ENDPOINTS ---

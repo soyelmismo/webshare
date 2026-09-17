@@ -228,9 +228,177 @@ export class StreamTransferManager {
   private driveFolderCache: Map<string, string> = new Map();
   private driveFolderInFlight: Map<string, Promise<string>> = new Map();
 
+  // BitTorrent-style Queue Scheduler
+  private maxConcurrentDownloads: number = 2;
+  private activeAccountTokens: Map<string, string> = new Map();
+  private isDispatchingQueue: boolean = false;
+  private queueWatchdogTimer: NodeJS.Timeout | null = null;
+
   constructor() {
     this.cleanupDiskCache();
     this.loadTasksFromDisk();
+    this.startQueueWatchdog();
+  }
+
+  /**
+   * Registers or updates an active OAuth access token in RAM for background queue dispatching.
+   */
+  public recordAccountToken(accessToken: string, accountEmail?: string): void {
+    if (!accessToken || typeof accessToken !== "string") return;
+    const cleanToken = accessToken.replace(/^Bearer\s+/i, "").trim();
+    if (!cleanToken) return;
+
+    if (accountEmail && accountEmail.trim()) {
+      this.activeAccountTokens.set(accountEmail.trim().toLowerCase(), cleanToken);
+    }
+    this.activeAccountTokens.set("__default__", cleanToken);
+  }
+
+  /**
+   * Retrieves the most relevant OAuth token for a given account.
+   */
+  public getAccountToken(accountEmail?: string): string | undefined {
+    if (accountEmail && accountEmail.trim()) {
+      const email = accountEmail.trim().toLowerCase();
+      if (this.activeAccountTokens.has(email)) {
+        return this.activeAccountTokens.get(email);
+      }
+    }
+    return this.activeAccountTokens.get("__default__");
+  }
+
+  public getMaxConcurrentDownloads(): number {
+    return this.maxConcurrentDownloads;
+  }
+
+  public setMaxConcurrentDownloads(limit: number): void {
+    const val = Number(limit);
+    if (!isNaN(val) && val >= 1 && val <= 10) {
+      this.maxConcurrentDownloads = val;
+      this.dispatchQueue();
+    }
+  }
+
+  /**
+   * Autonomous BitTorrent-style Queue Dispatcher.
+   * Promotes queued tasks to streaming whenever an active slot becomes available,
+   * respecting maxConcurrentDownloads and queue positions.
+   */
+  public async dispatchQueue(): Promise<void> {
+    if (this.isDispatchingQueue) return;
+    this.isDispatchingQueue = true;
+
+    try {
+      // 1. Count currently active streaming tasks
+      const activeTasks = Array.from(this.tasks.values()).filter(
+        (t) => t.status === "streaming"
+      );
+
+      const availableSlots = this.maxConcurrentDownloads - activeTasks.length;
+      if (availableSlots <= 0) {
+        return;
+      }
+
+      // 2. Find and sort all queued tasks by queueIndex ascending, then startedAt
+      const queuedTasks = Array.from(this.tasks.values())
+        .filter((t) => t.status === "queued")
+        .sort((a, b) => {
+          const qA = typeof a.queueIndex === "number" ? a.queueIndex : Infinity;
+          const qB = typeof b.queueIndex === "number" ? b.queueIndex : Infinity;
+          if (qA !== qB) return qA - qB;
+          return a.startedAt - b.startedAt;
+        });
+
+      if (queuedTasks.length === 0) {
+        return;
+      }
+
+      // 3. Promote queued tasks up to availableSlots
+      let promotedCount = 0;
+      for (const task of queuedTasks) {
+        if (promotedCount >= availableSlots) break;
+        const token = this.getAccountToken(task.accountEmail);
+        if (!token) {
+          continue;
+        }
+
+        console.log(`[QueueScheduler] Promoviendo tarea de cola a streaming: #${task.queueIndex || 1} "${task.fileName}"`);
+        task.status = "streaming";
+        this.saveTasksToDisk();
+
+        // Launch the autonomous streaming loop for this task
+        this.runStreamingLoop(task.id, token);
+        promotedCount++;
+      }
+    } catch (err: any) {
+      console.warn("[QueueScheduler] Error en dispatchQueue:", err?.message);
+    } finally {
+      this.isDispatchingQueue = false;
+    }
+  }
+
+  /**
+   * Reorders a queued task within the queue (up, down, top, bottom), exactly like a torrent client.
+   */
+  public reorderQueueTask(taskId: string, action: "up" | "down" | "top" | "bottom"): boolean {
+    const targetTask = this.tasks.get(taskId);
+    if (!targetTask || targetTask.status !== "queued") {
+      return false;
+    }
+
+    const targetEmail = (targetTask.accountEmail || "").toLowerCase();
+    // Get all queued tasks for this account sorted by current queueIndex / startedAt
+    const queuedTasks = Array.from(this.tasks.values())
+      .filter((t) => t.status === "queued" && (!targetEmail || !t.accountEmail || t.accountEmail.toLowerCase() === targetEmail))
+      .sort((a, b) => {
+        const qA = typeof a.queueIndex === "number" ? a.queueIndex : Infinity;
+        const qB = typeof b.queueIndex === "number" ? b.queueIndex : Infinity;
+        if (qA !== qB) return qA - qB;
+        return a.startedAt - b.startedAt;
+      });
+
+    const currentIndex = queuedTasks.findIndex((t) => t.id === taskId);
+    if (currentIndex === -1) return false;
+
+    if (action === "up") {
+      if (currentIndex > 0) {
+        const temp = queuedTasks[currentIndex];
+        queuedTasks[currentIndex] = queuedTasks[currentIndex - 1];
+        queuedTasks[currentIndex - 1] = temp;
+      }
+    } else if (action === "down") {
+      if (currentIndex < queuedTasks.length - 1) {
+        const temp = queuedTasks[currentIndex];
+        queuedTasks[currentIndex] = queuedTasks[currentIndex + 1];
+        queuedTasks[currentIndex + 1] = temp;
+      }
+    } else if (action === "top") {
+      const [item] = queuedTasks.splice(currentIndex, 1);
+      queuedTasks.unshift(item);
+    } else if (action === "bottom") {
+      const [item] = queuedTasks.splice(currentIndex, 1);
+      queuedTasks.push(item);
+    }
+
+    // Renumber sequentially 1..N
+    queuedTasks.forEach((t, idx) => {
+      t.queueIndex = idx + 1;
+      t.totalInBatch = queuedTasks.length;
+    });
+
+    this.saveTasksToDisk();
+    this.dispatchQueue();
+    return true;
+  }
+
+  private startQueueWatchdog(): void {
+    if (this.queueWatchdogTimer) clearInterval(this.queueWatchdogTimer);
+    this.queueWatchdogTimer = setInterval(() => {
+      this.dispatchQueue();
+    }, 2500);
+    if (this.queueWatchdogTimer && typeof this.queueWatchdogTimer.unref === "function") {
+      this.queueWatchdogTimer.unref();
+    }
   }
 
   /**
@@ -856,6 +1024,7 @@ export class StreamTransferManager {
     sessionUri: string,
     fileSize: number
   ): Promise<number> {
+    if (!sessionUri) return 0;
     try {
       const res = await fetchWithRetry(sessionUri, {
         method: "PUT",
@@ -1015,10 +1184,16 @@ export class StreamTransferManager {
       }
     }
 
-    // 1. Initialize Google Drive resumable upload session (deferred if queued / skipSessionInit)
-    let sessionUri = "";
-    const taskStatus = initialStatus || (skipSessionInit ? "queued" : "streaming");
+    if (accessToken) {
+      this.recordAccountToken(accessToken, accountEmail);
+    }
 
+    // 1. Queue vs Streaming Slot Assignment
+    const activeStreaming = Array.from(this.tasks.values()).filter((t) => t.status === "streaming").length;
+    const shouldQueue = !initialStatus && activeStreaming >= this.maxConcurrentDownloads;
+    const taskStatus = initialStatus || (shouldQueue || skipSessionInit ? "queued" : "streaming");
+
+    let sessionUri = "";
     if (!skipSessionInit && taskStatus === "streaming") {
       try {
         sessionUri = await this.initDriveResumableUpload(
@@ -1033,6 +1208,12 @@ export class StreamTransferManager {
     }
 
     const totalChunks = Math.ceil(inspected.fileSize / chunkSizeBytes);
+
+    let assignedQueueIndex = queueIndex;
+    if (taskStatus === "queued" && typeof assignedQueueIndex !== "number") {
+      const currentQueued = Array.from(this.tasks.values()).filter((t) => t.status === "queued").length;
+      assignedQueueIndex = currentQueued + 1;
+    }
 
     const task: StreamDriveTask = {
       id: taskId,
@@ -1059,7 +1240,7 @@ export class StreamTransferManager {
       status: taskStatus,
       startedAt: Date.now(),
       selectedFilePath: cleanSelectedPath || undefined,
-      queueIndex,
+      queueIndex: assignedQueueIndex,
       totalInBatch,
       batchId,
     };
@@ -1091,7 +1272,7 @@ export class StreamTransferManager {
           startedAt: task.startedAt,
           updatedAt: Date.now(),
           selectedFilePath: task.selectedFilePath,
-          queueIndex,
+          queueIndex: task.queueIndex,
           totalInBatch,
           batchId,
         });
@@ -1102,9 +1283,11 @@ export class StreamTransferManager {
       }
     }
 
-    // 3. Launch background streaming process if active
+    // 3. Launch background streaming process if active, otherwise dispatch queue
     if (task.status === "streaming") {
       this.runStreamingLoop(taskId, accessToken);
+    } else {
+      this.dispatchQueue();
     }
 
     return task;
@@ -1132,6 +1315,10 @@ export class StreamTransferManager {
       files,
     } = params;
 
+    if (accessToken) {
+      this.recordAccountToken(accessToken, accountEmail);
+    }
+
     const batchId = `batch_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const createdTasks: StreamDriveTask[] = [];
 
@@ -1143,7 +1330,7 @@ export class StreamTransferManager {
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      const isFirstActive = i === 0 && activeCount < 2;
+      const isFirstActive = i < this.maxConcurrentDownloads && (activeCount + i) < this.maxConcurrentDownloads;
 
       const task = await this.startStreamTask({
         sourceUrl,
@@ -1165,6 +1352,7 @@ export class StreamTransferManager {
       createdTasks.push(task);
     }
 
+    this.dispatchQueue();
     return { batchId, tasks: createdTasks };
   }
 
@@ -1203,8 +1391,8 @@ export class StreamTransferManager {
           (!task.accountEmail || !t.accountEmail || t.accountEmail.toLowerCase() === task.accountEmail.toLowerCase())
       ).length;
 
-      if (activeStreamingCount >= 2) {
-        // Limit of 2 concurrent active streams reached; remain queued
+      if (activeStreamingCount >= this.maxConcurrentDownloads) {
+        // Limit of concurrent active streams reached; remain queued
         return false;
       }
 
@@ -1480,17 +1668,19 @@ export class StreamTransferManager {
     }
 
     try {
-      // Check current committed offset on Google Drive
-      const committed = await this.queryDriveSessionCommittedBytes(
-        task.resumableUploadUrl,
-        task.fileSize
-      );
-      if (committed > task.uploadedBytes) {
-        task.uploadedBytes = committed;
-        task.uploadedBytesFormatted = formatBytes(committed);
-        task.currentChunkIndex = Math.floor(committed / task.chunkSizeBytes);
-        task.progressPercent = Math.min(100, Math.round((committed / task.fileSize) * 100));
-        this.evictConfirmedPieces(task, committed);
+      // Check current committed offset on Google Drive if session exists
+      if (task.resumableUploadUrl) {
+        const committed = await this.queryDriveSessionCommittedBytes(
+          task.resumableUploadUrl,
+          task.fileSize
+        );
+        if (committed > task.uploadedBytes) {
+          task.uploadedBytes = committed;
+          task.uploadedBytesFormatted = formatBytes(committed);
+          task.currentChunkIndex = Math.floor(committed / task.chunkSizeBytes);
+          task.progressPercent = Math.min(100, Math.round((committed / task.fileSize) * 100));
+          this.evictConfirmedPieces(task, committed);
+        }
       }
 
       while (task.uploadedBytes < task.fileSize && task.status === "streaming") {
@@ -1514,6 +1704,7 @@ export class StreamTransferManager {
       if (task.status === "completed" || task.status === "error" || task.status === "paused") {
         await this.destroyTorrentForTask(task);
       }
+      this.dispatchQueue();
     }
   }
 
@@ -1816,9 +2007,11 @@ export class StreamTransferManager {
     } catch {}
 
     this.saveTasksToDisk();
+    this.dispatchQueue();
 
     // Update manifest in Drive with paused state if accessToken provided
     if (accessToken && task.manifestFileId) {
+      this.recordAccountToken(accessToken, task.accountEmail);
       this.saveManifestToDrive(
         accessToken,
         task.driveFolderId,
@@ -2033,6 +2226,25 @@ export class StreamTransferManager {
       }
     }
 
+    if (accessToken) {
+      this.recordAccountToken(accessToken, task.accountEmail);
+    }
+
+    const activeCount = Array.from(this.tasks.values()).filter(
+      (t) => t.status === "streaming"
+    ).length;
+
+    if (activeCount >= this.maxConcurrentDownloads) {
+      task.status = "queued";
+      task.error = undefined;
+      const currentQueued = Array.from(this.tasks.values()).filter(
+        (t) => t.status === "queued" && t.id !== taskId
+      ).length;
+      task.queueIndex = currentQueued + 1;
+      this.saveTasksToDisk();
+      return true;
+    }
+
     task.status = "streaming";
     task.error = undefined;
     this.saveTasksToDisk();
@@ -2059,6 +2271,11 @@ export class StreamTransferManager {
       this.saveTasksToDisk();
       this.cleanupDiskCache();
     }
+
+    if (accessToken) {
+      this.recordAccountToken(accessToken, task?.accountEmail);
+    }
+    this.dispatchQueue();
 
     // Attempt to delete manifest from Drive if we have access token
     if (accessToken) {

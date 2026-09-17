@@ -157,3 +157,35 @@ export async function recoverStreamTasksFromDrive(
   }
   return await res.json();
 }
+
+export async function getQueueConfig(): Promise<{ maxConcurrentDownloads: number }> {
+  const res = await fetch("/api/stream/queue/config");
+  if (!res.ok) return { maxConcurrentDownloads: 2 };
+  return await res.json();
+}
+
+export async function updateQueueConfig(maxConcurrentDownloads: number): Promise<{ success: boolean; maxConcurrentDownloads: number }> {
+  const res = await fetch("/api/stream/queue/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ maxConcurrentDownloads }),
+  });
+  if (!res.ok) throw new Error("Error al actualizar configuración de cola");
+  return await res.json();
+}
+
+export async function reorderStreamQueue(
+  taskId: string,
+  action: "up" | "down" | "top" | "bottom",
+  accessToken?: string,
+  accountEmail?: string
+): Promise<boolean> {
+  const res = await fetch("/api/stream/queue/reorder", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ taskId, action, accessToken, accountEmail }),
+  });
+  if (!res.ok) return false;
+  const data = await res.json();
+  return Boolean(data.success);
+}

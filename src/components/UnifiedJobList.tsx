@@ -28,10 +28,17 @@ import {
   Database,
   CloudDownload,
   Folder,
+  ArrowUp,
+  ArrowDown,
+  ChevronsUp,
+  ChevronsDown,
+  Sliders,
+  ListOrdered,
 } from "lucide-react";
 import { SequentialStreamJob, StreamDriveTask } from "../types";
 import { StoredDriveSession, loadDriveSession, setActiveAccount, onDriveSessionChange } from "../utils/driveStorage";
 import { googleSignIn } from "../utils/firebaseAuth";
+import { getQueueConfig, updateQueueConfig, reorderStreamQueue } from "../utils/streamApi";
 
 export interface UnifiedJobItem {
   id: string;
@@ -142,6 +149,20 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
 
   // Account dropdown state
   const [isAccountDropdownOpen, setIsAccountDropdownOpen] = useState<boolean>(false);
+
+  // BitTorrent Queue configuration state
+  const [maxConcurrentDownloads, setMaxConcurrentDownloads] = useState<number>(2);
+  const [isUpdatingQueue, setIsUpdatingQueue] = useState<boolean>(false);
+
+  useEffect(() => {
+    getQueueConfig()
+      .then((cfg) => {
+        if (cfg?.maxConcurrentDownloads) {
+          setMaxConcurrentDownloads(cfg.maxConcurrentDownloads);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const activeToken = accessToken || driveSession?.token || null;
   const activeAccountEmail = driveSession?.activeAccount?.email || driveSession?.user?.email || "";
@@ -269,7 +290,31 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
         }
       }
 
-      const merged = Array.from(jobsMap.values()).sort((a, b) => b.startedAt - a.startedAt);
+      const merged = Array.from(jobsMap.values()).sort((a, b) => {
+        const getPriority = (status: string) => {
+          if (status === "streaming" || status === "downloading" || status === "starting") return 1;
+          if (status === "queued") return 2;
+          if (status === "paused") return 3;
+          return 4; // completed, failed, cancelled
+        };
+
+        const prioA = getPriority(a.status);
+        const prioB = getPriority(b.status);
+
+        if (prioA !== prioB) {
+          return prioA - prioB;
+        }
+
+        // Within queued jobs, sort by queueIndex ascending (1, 2, 3...)
+        if (a.status === "queued" && b.status === "queued") {
+          const qA = typeof a.queueIndex === "number" ? a.queueIndex : 9999;
+          const qB = typeof b.queueIndex === "number" ? b.queueIndex : 9999;
+          if (qA !== qB) return qA - qB;
+          return a.startedAt - b.startedAt;
+        }
+
+        return b.startedAt - a.startedAt;
+      });
       saveCachedJobs(merged);
 
       setUnifiedJobs((prev) => {
@@ -281,6 +326,7 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
               !m ||
               p.id !== m.id ||
               p.status !== m.status ||
+              p.queueIndex !== m.queueIndex ||
               p.progressPercent !== m.progressPercent ||
               p.downloadedBytes !== m.downloadedBytes ||
               p.downloadSpeedStr !== m.downloadSpeedStr ||
@@ -571,6 +617,42 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
     }
   };
 
+  // BitTorrent Queue Handlers
+  const handleUpdateConcurrency = async (newLimit: number) => {
+    if (newLimit < 1 || newLimit > 10) return;
+    setIsUpdatingQueue(true);
+    try {
+      const res = await updateQueueConfig(newLimit);
+      if (res.success) {
+        setMaxConcurrentDownloads(res.maxConcurrentDownloads);
+        await fetchAllJobs();
+      }
+    } catch (err) {
+      console.warn("Error updating queue config:", err);
+    } finally {
+      setIsUpdatingQueue(false);
+    }
+  };
+
+  const handleReorderQueue = async (taskId: string, action: "up" | "down" | "top" | "bottom") => {
+    setActionJobId(taskId);
+    try {
+      const success = await reorderStreamQueue(
+        taskId,
+        action,
+        activeToken || undefined,
+        activeAccountEmail || undefined
+      );
+      if (success) {
+        await fetchAllJobs();
+      }
+    } catch (err) {
+      console.warn("Error reordering queue:", err);
+    } finally {
+      setActionJobId(null);
+    }
+  };
+
   // Filter jobs
   const filteredJobs = unifiedJobs.filter((job) => {
     // Filter by type/status
@@ -596,9 +678,11 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
   const selectedJob = unifiedJobs.find((j) => j.id === selectedJobId) || filteredJobs[0];
 
   // Helper stats
-  const activeCount = unifiedJobs.filter(
-    (j) => j.status === "streaming" || j.status === "downloading" || j.status === "starting" || j.status === "queued"
+  const streamingCount = unifiedJobs.filter(
+    (j) => j.status === "streaming" || j.status === "downloading" || j.status === "starting"
   ).length;
+  const queuedCount = unifiedJobs.filter((j) => j.status === "queued").length;
+  const activeCount = streamingCount + queuedCount;
   const completedCount = unifiedJobs.filter((j) => j.status === "completed").length;
 
   return (
@@ -707,6 +791,56 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
                 </div>
               </div>
             )}
+          </div>
+        </div>
+      </div>
+
+      {/* BitTorrent Queue Manager & Concurrency Control Bar */}
+      <div className="bg-[#14171a] border border-[#22272e] rounded-xl px-4 py-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-sm font-sans text-xs">
+        <div className="flex items-center gap-3">
+          <div className="p-2 rounded-lg bg-[#1f242c] border border-[#3b424d] text-[#f59e0b] shrink-0">
+            <ListOrdered className="w-4 h-4 text-[#f59e0b]" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="font-bold text-[#f3f4f6]">Cola de Descarga BitTorrent</span>
+              <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-[#161a1f] text-[#60a5fa] border border-[#262b32]">
+                {streamingCount}/{maxConcurrentDownloads} slots activos
+              </span>
+              {queuedCount > 0 && (
+                <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-[#78350f]/30 text-[#f59e0b] border border-[#f59e0b]/40 font-semibold">
+                  {queuedCount} en espera
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] text-[#9ca3af]">
+              Despacho autónomo: promueve automáticamente los torrents en cola cuando se libera un slot.
+            </p>
+          </div>
+        </div>
+
+        {/* Concurrency Selector */}
+        <div className="flex items-center gap-2 bg-[#101317] p-1.5 rounded-lg border border-[#22272e] self-end sm:self-auto">
+          <div className="flex items-center gap-1.5 text-[11px] text-[#9ca3af] px-1 font-mono">
+            <Sliders className="w-3.5 h-3.5 text-[#10b981]" />
+            <span>Simultáneos:</span>
+          </div>
+          <div className="flex items-center gap-1">
+            {[1, 2, 3, 5].map((num) => (
+              <button
+                key={num}
+                onClick={() => handleUpdateConcurrency(num)}
+                disabled={isUpdatingQueue}
+                className={`px-2.5 py-1 rounded text-xs font-mono font-bold transition-all cursor-pointer ${
+                  maxConcurrentDownloads === num
+                    ? "bg-[#10b981] text-[#0b0d0e] shadow-sm"
+                    : "text-[#9ca3af] hover:text-[#f3f4f6] hover:bg-[#1f242c]"
+                }`}
+                title={`Limitar a máximo ${num} transferencias simultáneas activas`}
+              >
+                {num}
+              </button>
+            ))}
           </div>
         </div>
       </div>
@@ -872,6 +1006,46 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
 
               {/* Individual Controls */}
               <div className="flex items-center gap-2 shrink-0">
+                {selectedJob.status === "queued" && selectedJob.engineType === "stream" && (
+                  <div className="flex items-center gap-1 bg-[#101317] p-1 rounded-lg border border-[#22272e]">
+                    <span className="text-[10px] text-[#f59e0b] px-1.5 font-bold font-mono">
+                      Prioridad Cola:
+                    </span>
+                    <button
+                      onClick={() => handleReorderQueue(selectedJob.id, "top")}
+                      disabled={actionJobId === selectedJob.id || selectedJob.queueIndex === 1}
+                      className="p-1.5 rounded text-[#9ca3af] hover:text-[#34d399] hover:bg-[#1f242c] disabled:opacity-30 transition-colors cursor-pointer"
+                      title="Mover al inicio de la cola (Top)"
+                    >
+                      <ChevronsUp className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={() => handleReorderQueue(selectedJob.id, "up")}
+                      disabled={actionJobId === selectedJob.id || selectedJob.queueIndex === 1}
+                      className="p-1.5 rounded text-[#9ca3af] hover:text-[#34d399] hover:bg-[#1f242c] disabled:opacity-30 transition-colors cursor-pointer"
+                      title="Subir prioridad (▲)"
+                    >
+                      <ArrowUp className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={() => handleReorderQueue(selectedJob.id, "down")}
+                      disabled={actionJobId === selectedJob.id}
+                      className="p-1.5 rounded text-[#9ca3af] hover:text-[#34d399] hover:bg-[#1f242c] disabled:opacity-30 transition-colors cursor-pointer"
+                      title="Bajar prioridad (▼)"
+                    >
+                      <ArrowDown className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={() => handleReorderQueue(selectedJob.id, "bottom")}
+                      disabled={actionJobId === selectedJob.id}
+                      className="p-1.5 rounded text-[#9ca3af] hover:text-[#34d399] hover:bg-[#1f242c] disabled:opacity-30 transition-colors cursor-pointer"
+                      title="Mover al final de la cola (Bottom)"
+                    >
+                      <ChevronsDown className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+
                 {(selectedJob.status === "streaming" || selectedJob.status === "downloading") && (
                   <button
                     onClick={() => handlePauseJob(selectedJob)}
@@ -1089,13 +1263,13 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
                         {/* Status */}
                         <td className="p-3">
                           <span
-                            className={`px-1.5 py-0.5 rounded text-[10px] uppercase font-bold ${
+                            className={`px-1.5 py-0.5 rounded text-[10px] uppercase font-bold flex items-center gap-1 w-fit ${
                               job.status === "completed"
                                 ? "text-[#34d399]"
                                 : job.status === "streaming" || job.status === "downloading"
                                 ? "text-[#60a5fa] animate-pulse"
                                 : job.status === "queued"
-                                ? "text-[#f59e0b]"
+                                ? "bg-[#78350f]/30 text-[#f59e0b] border border-[#f59e0b]/40 font-semibold"
                                 : job.status === "paused"
                                 ? "text-[#f59e0b]"
                                 : job.status === "failed" || job.status === "error"
@@ -1103,9 +1277,14 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
                                 : "text-[#9ca3af]"
                             }`}
                           >
-                            {job.status === "queued"
-                              ? `En cola ${job.queueIndex ? `#${job.queueIndex}${job.totalInBatch ? `/${job.totalInBatch}` : ""}` : ""}`
-                              : job.status}
+                            {job.status === "queued" ? (
+                              <>
+                                <ListOrdered className="w-3 h-3 text-[#f59e0b]" />
+                                <span>Cola #{job.queueIndex || 1}</span>
+                              </>
+                            ) : (
+                              job.status
+                            )}
                           </span>
                         </td>
 
@@ -1146,6 +1325,43 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
                         {/* Actions */}
                         <td className="p-3 text-right" onClick={(e) => e.stopPropagation()}>
                           <div className="flex items-center justify-end gap-1">
+                            {job.status === "queued" && job.engineType === "stream" && (
+                              <div className="flex items-center gap-0.5 mr-1 bg-[#14171a] p-0.5 rounded border border-[#22272e]">
+                                <button
+                                  onClick={() => handleReorderQueue(job.id, "top")}
+                                  disabled={actionJobId === job.id || job.queueIndex === 1}
+                                  className="p-1 rounded text-[#9ca3af] hover:text-[#34d399] hover:bg-[#1f242c] disabled:opacity-30 transition-colors cursor-pointer"
+                                  title="Mover al inicio de la cola (Top)"
+                                >
+                                  <ChevronsUp className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  onClick={() => handleReorderQueue(job.id, "up")}
+                                  disabled={actionJobId === job.id || job.queueIndex === 1}
+                                  className="p-1 rounded text-[#9ca3af] hover:text-[#34d399] hover:bg-[#1f242c] disabled:opacity-30 transition-colors cursor-pointer"
+                                  title="Subir prioridad (▲)"
+                                >
+                                  <ArrowUp className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  onClick={() => handleReorderQueue(job.id, "down")}
+                                  disabled={actionJobId === job.id}
+                                  className="p-1 rounded text-[#9ca3af] hover:text-[#34d399] hover:bg-[#1f242c] disabled:opacity-30 transition-colors cursor-pointer"
+                                  title="Bajar prioridad (▼)"
+                                >
+                                  <ArrowDown className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  onClick={() => handleReorderQueue(job.id, "bottom")}
+                                  disabled={actionJobId === job.id}
+                                  className="p-1 rounded text-[#9ca3af] hover:text-[#34d399] hover:bg-[#1f242c] disabled:opacity-30 transition-colors cursor-pointer"
+                                  title="Mover al final de la cola (Bottom)"
+                                >
+                                  <ChevronsDown className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            )}
+
                             {(job.status === "streaming" || job.status === "downloading") && (
                               <button
                                 onClick={() => handlePauseJob(job)}

@@ -208,6 +208,7 @@ export class StreamTransferManager {
   private tasks: Map<string, StreamDriveTask> = new Map();
   private abortControllers: Map<string, AbortController> = new Map();
   private torrentsMap: Map<string, any> = new Map();
+  private deletedTaskIds: Set<string> = new Set();
 
   constructor() {
     this.loadTasksFromDisk();
@@ -469,11 +470,31 @@ export class StreamTransferManager {
     const manifestName = `stream_manifest_${manifest.taskId}.json`;
     const bodyStr = JSON.stringify(manifest, null, 2);
 
-    if (existingManifestFileId) {
+    let fileIdToUpdate = existingManifestFileId || this.tasks.get(manifest.taskId)?.manifestFileId;
+
+    if (!fileIdToUpdate) {
+      try {
+        const queryUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(
+          `name = '${manifestName}' and trashed = false`
+        )}&fields=files(id,name)`;
+        const searchRes = await fetchWithRetry(queryUrl, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          signal: AbortSignal.timeout(4000),
+        });
+        if (searchRes.ok) {
+          const searchData = (await searchRes.json()) as { files?: Array<{ id: string }> };
+          if (searchData.files && searchData.files.length > 0) {
+            fileIdToUpdate = searchData.files[0].id;
+          }
+        }
+      } catch {}
+    }
+
+    if (fileIdToUpdate) {
       // Update existing file
       try {
         const updateRes = await fetchWithRetry(
-          `https://www.googleapis.com/upload/drive/v3/files/${existingManifestFileId}?uploadType=media`,
+          `https://www.googleapis.com/upload/drive/v3/files/${fileIdToUpdate}?uploadType=media`,
           {
             method: "PATCH",
             headers: {
@@ -484,15 +505,15 @@ export class StreamTransferManager {
           }
         );
         if (updateRes.ok) {
-          return existingManifestFileId;
+          const task = this.tasks.get(manifest.taskId);
+          if (task) task.manifestFileId = fileIdToUpdate;
+          return fileIdToUpdate;
         }
         if (updateRes.status === 401) {
-          // Token expired. The upload to Google Drive capability URI continues uninterrupted,
-          // but updating the optional Drive manifest is skipped gracefully without noisy error spam.
-          return existingManifestFileId;
+          return fileIdToUpdate;
         }
       } catch {
-        return existingManifestFileId;
+        return fileIdToUpdate;
       }
     }
 
@@ -586,6 +607,17 @@ export class StreamTransferManager {
     torrentBase64?: string;
   }): Promise<StreamDriveTask> {
     const { sourceUrl, accessToken, folderId, customChunkSizeMB, customFileName, torrentBase64 } = params;
+
+    // Deduplication check: return existing task if currently active/streaming or paused for same sourceUrl
+    for (const existingTask of this.tasks.values()) {
+      if (
+        (existingTask.status === "streaming" || existingTask.status === "paused") &&
+        existingTask.sourceUrl === sourceUrl
+      ) {
+        console.log(`[StreamManager] Retornando tarea existente (${existingTask.id}) para URL: ${sourceUrl}`);
+        return existingTask;
+      }
+    }
 
     let inspected = await this.inspectSource(sourceUrl, torrentBase64);
 
@@ -1375,31 +1407,58 @@ export class StreamTransferManager {
    * Cancels and cleans up a streaming task.
    */
   public async cancelTask(taskId: string, accessToken?: string): Promise<boolean> {
+    this.deletedTaskIds.add(taskId);
     const task = this.tasks.get(taskId);
-    if (!task) return false;
 
-    task.status = "idle";
-    const controller = this.abortControllers.get(taskId);
-    if (controller) {
-      controller.abort();
-      this.abortControllers.delete(taskId);
+    if (task) {
+      task.status = "idle";
+      const controller = this.abortControllers.get(taskId);
+      if (controller) {
+        controller.abort();
+        this.abortControllers.delete(taskId);
+      }
+      this.tasks.delete(taskId);
+      this.saveTasksToDisk();
     }
 
     // Attempt to delete manifest from Drive if we have access token
-    if (accessToken && task.manifestFileId) {
+    if (accessToken) {
       try {
-        await fetchWithRetry(`https://www.googleapis.com/drive/v3/files/${task.manifestFileId}`, {
-          method: "DELETE",
+        if (task?.manifestFileId) {
+          await fetchWithRetry(`https://www.googleapis.com/drive/v3/files/${task.manifestFileId}`, {
+            method: "DELETE",
+            headers: { Authorization: `Bearer ${accessToken}` },
+            signal: AbortSignal.timeout(5000),
+          }).catch(() => {});
+        }
+
+        // Search for any manifest file matching stream_manifest_${taskId}.json
+        const manifestName = `stream_manifest_${taskId}.json`;
+        const searchUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(
+          `name = '${manifestName}' and trashed = false`
+        )}&fields=files(id,name)`;
+        const searchRes = await fetchWithRetry(searchUrl, {
           headers: { Authorization: `Bearer ${accessToken}` },
-          signal: AbortSignal.timeout(5000)
+          signal: AbortSignal.timeout(5000),
         });
+
+        if (searchRes.ok) {
+          const searchData = (await searchRes.json()) as { files?: Array<{ id: string }> };
+          if (searchData.files && searchData.files.length > 0) {
+            for (const file of searchData.files) {
+              await fetchWithRetry(`https://www.googleapis.com/drive/v3/files/${file.id}`, {
+                method: "DELETE",
+                headers: { Authorization: `Bearer ${accessToken}` },
+                signal: AbortSignal.timeout(5000),
+              }).catch(() => {});
+            }
+          }
+        }
       } catch (e) {
         console.warn("Failed to delete manifest from Drive on cancel:", e);
       }
     }
 
-    this.tasks.delete(taskId);
-    this.saveTasksToDisk();
     return true;
   }
 
@@ -1480,6 +1539,15 @@ export class StreamTransferManager {
         if (!contentRes.ok) continue;
         const manifest = (await contentRes.json()) as StreamManifestData;
         if (!manifest || !manifest.taskId || !manifest.resumableUploadUrl) continue;
+
+        // Clean up deleted tasks or duplicate manifest files from Drive
+        if (this.deletedTaskIds.has(manifest.taskId) || seenTaskIds.has(manifest.taskId)) {
+          fetchWithRetry(`https://www.googleapis.com/drive/v3/files/${file.id}`, {
+            method: "DELETE",
+            headers: { Authorization: `Bearer ${accessToken}` },
+          }).catch(() => {});
+          continue;
+        }
 
         seenTaskIds.add(manifest.taskId);
 

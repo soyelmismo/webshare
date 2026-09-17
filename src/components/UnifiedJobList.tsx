@@ -68,6 +68,26 @@ interface UnifiedJobListProps {
 }
 
 const LOCAL_JOBS_CACHE_KEY = "gdrive_unified_jobs_cache";
+const LOCAL_DELETED_JOBS_KEY = "gdrive_unified_deleted_jobs";
+
+function getDeletedJobIds(): Set<string> {
+  if (typeof window === "undefined") return new Set();
+  try {
+    const raw = localStorage.getItem(LOCAL_DELETED_JOBS_KEY);
+    return raw ? new Set(JSON.parse(raw)) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function addDeletedJobId(jobId: string) {
+  if (typeof window === "undefined") return;
+  try {
+    const set = getDeletedJobIds();
+    set.add(jobId);
+    localStorage.setItem(LOCAL_DELETED_JOBS_KEY, JSON.stringify(Array.from(set).slice(-100)));
+  } catch {}
+}
 
 function getCachedJobs(): UnifiedJobItem[] {
   if (typeof window === "undefined") return [];
@@ -202,22 +222,44 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
       // 5. Combine and merge with local cache to survive serverless instance switching
       const freshCombined = [...normalizedStream, ...normalizedSeq];
       const cached = getCachedJobs();
+      const deletedIds = getDeletedJobIds();
 
       const jobsMap = new Map<string, UnifiedJobItem>();
 
-      // Populate from cache first
+      // Populate from cache first (excluding deleted)
       for (const cj of cached) {
-        jobsMap.set(cj.id, cj);
+        if (!deletedIds.has(cj.id)) {
+          jobsMap.set(cj.id, cj);
+        }
       }
 
-      // Overwrite/update with fresh server tasks
+      // Overwrite/update with fresh server tasks (excluding deleted)
       for (const fj of freshCombined) {
-        jobsMap.set(fj.id, fj);
+        if (!deletedIds.has(fj.id)) {
+          jobsMap.set(fj.id, fj);
+        }
       }
 
       const merged = Array.from(jobsMap.values()).sort((a, b) => b.startedAt - a.startedAt);
       saveCachedJobs(merged);
-      setUnifiedJobs(merged);
+
+      setUnifiedJobs((prev) => {
+        const isDifferent =
+          prev.length !== merged.length ||
+          prev.some((p, i) => {
+            const m = merged[i];
+            return (
+              !m ||
+              p.id !== m.id ||
+              p.status !== m.status ||
+              p.progressPercent !== m.progressPercent ||
+              p.downloadedBytes !== m.downloadedBytes ||
+              p.downloadSpeedStr !== m.downloadSpeedStr ||
+              p.error !== m.error
+            );
+          });
+        return isDifferent ? merged : prev;
+      });
 
       if (!selectedJobId && merged.length > 0) {
         setSelectedJobId(merged[0].id);
@@ -350,6 +392,7 @@ export const UnifiedJobList: React.FC<UnifiedJobListProps> = ({
   };
 
   const removeJobFromCacheAndState = (jobId: string) => {
+    addDeletedJobId(jobId);
     setUnifiedJobs((prev) => {
       const updated = prev.filter((j) => j.id !== jobId);
       saveCachedJobs(updated);

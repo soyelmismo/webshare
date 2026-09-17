@@ -131,7 +131,7 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
 
   const handleStartStream = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!url.trim()) return;
+    if (!url.trim() || isStarting) return;
 
     if (!hasToken) {
       setStartError("Debes vincular tu cuenta de Google Drive para iniciar el streaming.");

@@ -56,6 +56,7 @@ export async function startStreamToDrive(params: {
   torrentBase64?: string;
   selectedFilePath?: string;
   selectedFileSize?: number;
+  extractArchive?: boolean;
 }): Promise<{ success: boolean; task: StreamDriveTask }> {
   const res = await fetch("/api/stream/start", {
     method: "POST",
@@ -77,6 +78,7 @@ export async function startBatchStreamToDrive(params: {
   customChunkSizeMB?: number;
   torrentBase64?: string;
   files: Array<{ path: string; length: number; name?: string; url?: string }>;
+  extractArchive?: boolean;
 }): Promise<{ success: boolean; batchId: string; count: number; tasks: StreamDriveTask[] }> {
   const res = await fetch("/api/stream/start-batch", {
     method: "POST",

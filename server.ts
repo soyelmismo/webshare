@@ -23,6 +23,11 @@ import {
   isMediafireFolderUrl,
   getOrResolveMediafireDirectLink,
 } from "./server/mediafireResolver.js";
+import {
+  isFireloadUrl,
+  isFireloadFileUrl,
+  getOrResolveFireloadDirectLink,
+} from "./server/fireloadResolver.js";
 
 // Background rolling history buffer for server real-time charts
 interface HistoryPoint {
@@ -868,6 +873,12 @@ app.use(express.json({ limit: "50mb" }));
           effectiveUrl = await getOrResolveMediafireDirectLink(targetUrl);
         } catch (mfErr: any) {
           console.warn("[Download Proxy] Error resolviendo enlace directo MediaFire:", mfErr?.message);
+        }
+      } else if (isFireloadFileUrl(targetUrl)) {
+        try {
+          effectiveUrl = await getOrResolveFireloadDirectLink(targetUrl);
+        } catch (flErr: any) {
+          console.warn("[Download Proxy] Error resolviendo enlace directo Fireload:", flErr?.message);
         }
       }
 
@@ -2050,6 +2061,7 @@ app.use(express.json({ limit: "50mb" }));
         torrentBase64,
         selectedFilePath,
         selectedFileSize,
+        extractArchive,
       } = req.body;
       if (!sourceUrl) return res.status(400).json({ error: "Falta 'sourceUrl'" });
       if (!accessToken) return res.status(400).json({ error: "Falta 'accessToken' de Google Drive" });
@@ -2064,6 +2076,7 @@ app.use(express.json({ limit: "50mb" }));
         torrentBase64,
         selectedFilePath,
         selectedFileSize: selectedFileSize ? Number(selectedFileSize) : undefined,
+        extractArchive: typeof extractArchive === "boolean" ? extractArchive : Boolean(extractArchive),
       });
 
       res.json({ success: true, task });
@@ -2082,6 +2095,7 @@ app.use(express.json({ limit: "50mb" }));
         customChunkSizeMB,
         torrentBase64,
         files,
+        extractArchive,
       } = req.body;
 
       if (!sourceUrl) return res.status(400).json({ error: "Falta 'sourceUrl'" });
@@ -2098,6 +2112,7 @@ app.use(express.json({ limit: "50mb" }));
         customChunkSizeMB: customChunkSizeMB ? Number(customChunkSizeMB) : undefined,
         torrentBase64,
         files,
+        extractArchive: typeof extractArchive === "boolean" ? extractArchive : Boolean(extractArchive),
       });
 
       res.json({ success: true, batchId: result.batchId, count: result.tasks.length, tasks: result.tasks });

@@ -6,6 +6,13 @@ import {
   resolveMediafireFolder,
   inspectMediafireFile,
 } from "./mediafireResolver.js";
+import {
+  isFireloadUrl,
+  isFireloadFolderUrl,
+  isFireloadFileUrl,
+  resolveFireloadFolder,
+  inspectFireloadFile,
+} from "./fireloadResolver.js";
 
 export interface InspectedFileInfo {
   fileName: string;
@@ -21,6 +28,8 @@ export interface InspectedFileInfo {
   webSeeds?: string[];
   activeMirrorUrl?: string;
   isMediafire?: boolean;
+  isFireload?: boolean;
+  hasArchives?: boolean;
 }
 
 export function formatBytes(bytes: number, decimals = 2): string {
@@ -438,6 +447,36 @@ export async function inspectAnySource(
         return await inspectMediafireFile(trimmed);
       } catch (mfErr: any) {
         console.warn("[MediaFire] Error al inspeccionar URL genérica de MediaFire:", mfErr?.message);
+      }
+    }
+  }
+
+  // 1.6. Fireload Folder & File Support
+  if (isFireloadFolderUrl(trimmed)) {
+    try {
+      return await resolveFireloadFolder(trimmed);
+    } catch (flErr: any) {
+      console.warn("[Fireload] Error inspeccionando carpeta de Fireload:", flErr?.message);
+      throw flErr;
+    }
+  }
+
+  if (isFireloadFileUrl(trimmed)) {
+    try {
+      return await inspectFireloadFile(trimmed);
+    } catch (flErr: any) {
+      console.warn("[Fireload] Error inspeccionando archivo de Fireload:", flErr?.message);
+    }
+  }
+
+  if (isFireloadUrl(trimmed)) {
+    try {
+      return await resolveFireloadFolder(trimmed);
+    } catch {
+      try {
+        return await inspectFireloadFile(trimmed);
+      } catch (flErr: any) {
+        console.warn("[Fireload] Error al inspeccionar URL genérica de Fireload:", flErr?.message);
       }
     }
   }

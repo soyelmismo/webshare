@@ -9,6 +9,12 @@ import {
   resolveMediafireDirectDownloadLink,
   getOrResolveMediafireDirectLink,
 } from "./mediafireResolver.js";
+import {
+  isFireloadUrl,
+  isFireloadFileUrl,
+  resolveFireloadDirectDownloadLink,
+  getOrResolveFireloadDirectLink,
+} from "./fireloadResolver.js";
 
 export interface SequentialEngineStartOptions {
   url: string;
@@ -159,6 +165,14 @@ export class SequentialChunkEngine {
         mfFileName = resolved.fileName;
       } catch (err: any) {
         console.warn("[SequentialEngine] Error resolviendo enlace MediaFire:", err.message);
+      }
+    } else if (isFireloadFileUrl(url)) {
+      try {
+        const resolved = await resolveFireloadDirectDownloadLink(url);
+        inspectUrl = resolved.directUrl;
+        mfFileName = resolved.fileName;
+      } catch (err: any) {
+        console.warn("[SequentialEngine] Error resolviendo enlace Fireload:", err.message);
       }
     }
 
@@ -327,6 +341,12 @@ export class SequentialChunkEngine {
         effectiveUrl = await getOrResolveMediafireDirectLink(url);
       } catch (err: any) {
         console.warn("[SequentialEngine] Error resolviendo direct link MediaFire:", err.message);
+      }
+    } else if (isFireloadUrl(url) && !/^https?:\/\/srv\d*\.fireload\.com\//i.test(url)) {
+      try {
+        effectiveUrl = await getOrResolveFireloadDirectLink(url);
+      } catch (err: any) {
+        console.warn("[SequentialEngine] Error resolviendo direct link Fireload:", err.message);
       }
     }
 

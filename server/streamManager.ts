@@ -16,6 +16,16 @@ import {
   getOrResolveMediafireDirectLink,
   invalidateMediafireDirectLinkCache,
 } from "./mediafireResolver.js";
+import {
+  isFireloadUrl,
+  getOrResolveFireloadDirectLink,
+  invalidateFireloadDirectLinkCache,
+} from "./fireloadResolver.js";
+import {
+  isArchiveFileName,
+  cleanArchiveFileName,
+  extractArchive,
+} from "./archiveExtractor.js";
 
 export { formatBytes };
 
@@ -1464,6 +1474,7 @@ export class StreamTransferManager {
     batchId?: string;
     skipSessionInit?: boolean;
     initialStatus?: "streaming" | "queued";
+    extractArchive?: boolean;
   }): Promise<StreamDriveTask> {
     const {
       sourceUrl,
@@ -1480,6 +1491,7 @@ export class StreamTransferManager {
       batchId,
       skipSessionInit = false,
       initialStatus,
+      extractArchive,
     } = params;
 
     // Deduplication check: if a task exists for exact same sourceUrl AND selectedFilePath/fileName
@@ -1549,6 +1561,7 @@ export class StreamTransferManager {
         customChunkSizeMB,
         torrentBase64: inspected.torrentBase64 || torrentBase64,
         files: inspected.files,
+        extractArchive,
       });
       return batchResult.tasks[0];
     }
@@ -1602,8 +1615,11 @@ export class StreamTransferManager {
     const shouldQueue = !initialStatus && activeStreaming >= this.maxConcurrentDownloads;
     const taskStatus = initialStatus || (shouldQueue || skipSessionInit ? "queued" : "streaming");
 
+    const isArchive = isArchiveFileName(fileName);
+    const shouldExtract = Boolean(extractArchive && isArchive);
+
     let sessionUri = "";
-    if (!skipSessionInit && taskStatus === "streaming") {
+    if (!shouldExtract && !skipSessionInit && taskStatus === "streaming") {
       try {
         sessionUri = await this.initDriveResumableUpload(
           accessToken,
@@ -1659,6 +1675,9 @@ export class StreamTransferManager {
       queueIndex: assignedQueueIndex,
       totalInBatch,
       batchId,
+      extractArchive: shouldExtract,
+      extractedFileName: shouldExtract ? cleanArchiveFileName(fileName) : undefined,
+      archivePhase: shouldExtract ? "downloading" : undefined,
     };
 
     this.tasks.set(taskId, task);
@@ -1720,6 +1739,7 @@ export class StreamTransferManager {
     customChunkSizeMB?: number;
     torrentBase64?: string;
     files: Array<{ path: string; length: number; name?: string; url?: string }>;
+    extractArchive?: boolean;
   }): Promise<{ batchId: string; tasks: StreamDriveTask[] }> {
     const {
       sourceUrl,
@@ -1729,6 +1749,7 @@ export class StreamTransferManager {
       customChunkSizeMB,
       torrentBase64,
       files,
+      extractArchive,
     } = params;
 
     if (accessToken) {
@@ -1789,6 +1810,9 @@ export class StreamTransferManager {
       );
       const fileUrl = (file as any).url || (matchingInspected as any)?.url || sourceUrl;
 
+      const isArchive = isArchiveFileName(fileName);
+      const shouldExtract = Boolean(extractArchive && isArchive);
+
       const taskId = `stream_${now}_${i}_${Math.random().toString(36).substring(2, 6)}`;
       const task: StreamDriveTask = {
         id: taskId,
@@ -1818,6 +1842,9 @@ export class StreamTransferManager {
         queueIndex: i + 1,
         totalInBatch: files.length,
         batchId,
+        extractArchive: shouldExtract,
+        extractedFileName: shouldExtract ? cleanArchiveFileName(fileName) : undefined,
+        archivePhase: shouldExtract ? "downloading" : undefined,
       };
 
       this.tasks.set(taskId, task);
@@ -2223,6 +2250,10 @@ export class StreamTransferManager {
     const task = this.tasks.get(taskId);
     if (!task) return;
 
+    if (task.extractArchive && isArchiveFileName(task.fileName)) {
+      return await this.runArchiveStreamingLoop(taskId, accessToken);
+    }
+
     const abortController = new AbortController();
     this.abortControllers.set(taskId, abortController);
 
@@ -2322,6 +2353,329 @@ export class StreamTransferManager {
     }
   }
 
+  /**
+   * Dedicated pipeline for downloading compressed archives, extracting them locally with 7-Zip,
+   * and uploading the uncompressed files directly to Google Drive.
+   */
+  private async runArchiveStreamingLoop(taskId: string, accessToken: string): Promise<void> {
+    const task = this.tasks.get(taskId);
+    if (!task) return;
+
+    const abortController = new AbortController();
+    this.abortControllers.set(taskId, abortController);
+
+    const tempBase = process.env.WEBSHARE_TMP_DIR || path.join(process.cwd(), ".tmp_archives");
+    const taskTempDir = path.join(tempBase, taskId);
+    const archivePath = path.join(taskTempDir, task.fileName);
+    const extractDir = path.join(taskTempDir, "extracted");
+
+    try {
+      fs.mkdirSync(taskTempDir, { recursive: true });
+
+      // --- FASE 1: DESCARGA DEL ARCHIVO COMPRIMIDO ---
+      let archiveDownloaded = false;
+      if (fs.existsSync(archivePath) && task.fileSize > 0 && fs.statSync(archivePath).size === task.fileSize) {
+        archiveDownloaded = true;
+      }
+
+      if (!archiveDownloaded) {
+        task.archivePhase = "downloading";
+        task.status = "streaming";
+        task.statusText = "Descargando archivo comprimido...";
+        task.speedMBs = 0;
+        this.saveTasksToDisk();
+
+        let downloadedBytes = 0;
+        if (fs.existsSync(archivePath)) {
+          downloadedBytes = fs.statSync(archivePath).size;
+        }
+
+        let effectiveUrl = task.sourceUrl;
+        if (isFireloadUrl(effectiveUrl) && !/^https?:\/\/srv\d*\.fireload\.com\//i.test(effectiveUrl)) {
+          try {
+            effectiveUrl = await getOrResolveFireloadDirectLink(effectiveUrl);
+          } catch (flErr: any) {
+            console.warn("[StreamManager] Error resolviendo enlace Fireload para descompresión:", flErr?.message);
+          }
+        } else if (isMediafireUrl(effectiveUrl) && !/^https?:\/\/download\d*\.mediafire\.com\//i.test(effectiveUrl)) {
+          try {
+            effectiveUrl = await getOrResolveMediafireDirectLink(effectiveUrl);
+          } catch (mfErr: any) {
+            console.warn("[StreamManager] Error resolviendo enlace MediaFire para descompresión:", mfErr?.message);
+          }
+        }
+
+        const isHttp = effectiveUrl.startsWith("http://") || effectiveUrl.startsWith("https://");
+
+        if (isHttp) {
+          const writeStream = fs.createWriteStream(archivePath, { flags: downloadedBytes > 0 ? "a" : "w" });
+          let lastTime = Date.now();
+          let bytesSinceLast = 0;
+
+          let res = await fetchWithRetry(effectiveUrl, {
+            headers: {
+              ...(downloadedBytes > 0 ? { Range: `bytes=${downloadedBytes}-${task.fileSize > 0 ? task.fileSize - 1 : ""}` } : {}),
+              "User-Agent": "Mozilla/5.0 (ServerSpecs Drive Streamer 1.0)",
+            },
+            signal: abortController.signal,
+          });
+
+          if (!res.ok && res.status !== 206) {
+            if (isFireloadUrl(task.sourceUrl) && (res.status === 403 || res.status === 404 || res.status === 410)) {
+              invalidateFireloadDirectLinkCache(task.sourceUrl);
+              effectiveUrl = await getOrResolveFireloadDirectLink(task.sourceUrl, true);
+              res = await fetchWithRetry(effectiveUrl, {
+                headers: {
+                  ...(downloadedBytes > 0 ? { Range: `bytes=${downloadedBytes}-${task.fileSize > 0 ? task.fileSize - 1 : ""}` } : {}),
+                  "User-Agent": "Mozilla/5.0 (ServerSpecs Drive Streamer 1.0)",
+                },
+                signal: abortController.signal,
+              });
+            } else if (isMediafireUrl(task.sourceUrl) && (res.status === 403 || res.status === 404 || res.status === 410)) {
+              invalidateMediafireDirectLinkCache(task.sourceUrl);
+              effectiveUrl = await getOrResolveMediafireDirectLink(task.sourceUrl, true);
+              res = await fetchWithRetry(effectiveUrl, {
+                headers: {
+                  ...(downloadedBytes > 0 ? { Range: `bytes=${downloadedBytes}-${task.fileSize > 0 ? task.fileSize - 1 : ""}` } : {}),
+                  "User-Agent": "Mozilla/5.0 (ServerSpecs Drive Streamer 1.0)",
+                },
+                signal: abortController.signal,
+              });
+            }
+          }
+
+          if (!res.ok && res.status !== 206) {
+            throw new Error(`HTTP ${res.status} al descargar archivo comprimido para descompresión.`);
+          }
+
+          if (!res.body) {
+            throw new Error("No se recibió cuerpo de respuesta del servidor remoto.");
+          }
+
+          const reader = res.body.getReader();
+          let lastSaveTime = Date.now();
+
+          try {
+            while (true) {
+              if (abortController.signal.aborted) break;
+              const { done, value } = await reader.read();
+              if (done) break;
+
+              writeStream.write(Buffer.from(value));
+              downloadedBytes += value.length;
+              bytesSinceLast += value.length;
+
+              const now = Date.now();
+              if (now - lastTime >= 1000) {
+                const timeDiffSec = (now - lastTime) / 1000;
+                task.speedMBs = Math.round((bytesSinceLast / (1024 * 1024) / timeDiffSec) * 10) / 10;
+                lastTime = now;
+                bytesSinceLast = 0;
+              }
+
+              task.uploadedBytes = downloadedBytes;
+              task.uploadedBytesFormatted = formatBytes(downloadedBytes);
+              task.progressPercent = task.fileSize > 0 ? Math.min(100, Math.round((downloadedBytes / task.fileSize) * 100)) : 0;
+              task.statusText = `Descargando comprimido (${task.progressPercent}%, ${task.speedMBs} MB/s)...`;
+
+              if (now - lastSaveTime >= 2000) {
+                this.saveTasksToDisk();
+                lastSaveTime = now;
+              }
+            }
+          } finally {
+            await new Promise<void>((resolve) => writeStream.end(resolve));
+          }
+        } else {
+          // Torrent or other chunked source
+          let start = downloadedBytes;
+          const chunkSizeBytes = task.chunkSizeBytes || 16 * 1024 * 1024;
+          let lastTime = Date.now();
+
+          while (start < task.fileSize && !abortController.signal.aborted) {
+            const end = Math.min(start + chunkSizeBytes, task.fileSize);
+            const chunk = await this.fetchSourceChunkSlice({
+              taskId: task.id,
+              sourceUrl: task.sourceUrl,
+              sourceType: task.sourceType,
+              start,
+              end,
+              signal: abortController.signal,
+              torrentBase64: this.getTorrentBase64ForTask(task),
+              webSeeds: task.webSeeds,
+              activeMirrorUrl: task.activeMirrorUrl,
+            });
+
+            fs.appendFileSync(archivePath, chunk);
+            const chunkLen = chunk.length;
+            start += chunkLen;
+
+            const now = Date.now();
+            const timeDiffSec = Math.max(0.1, (now - lastTime) / 1000);
+            task.speedMBs = Math.round((chunkLen / (1024 * 1024) / timeDiffSec) * 10) / 10;
+            lastTime = now;
+
+            task.uploadedBytes = start;
+            task.uploadedBytesFormatted = formatBytes(start);
+            task.progressPercent = Math.min(100, Math.round((start / task.fileSize) * 100));
+            task.statusText = `Descargando comprimido (${task.progressPercent}%, ${task.speedMBs} MB/s)...`;
+            this.saveTasksToDisk();
+          }
+        }
+
+        if (abortController.signal.aborted) return;
+      }
+
+      // --- FASE 2: DESCOMPRESIÓN CON 7-ZIP ---
+      task.archivePhase = "extracting";
+      task.status = "streaming";
+      task.statusText = "Descomprimiendo archivo con 7-Zip...";
+      task.speedMBs = 0;
+      this.saveTasksToDisk();
+
+      const { extractedFiles } = await extractArchive(
+        archivePath,
+        extractDir,
+        abortController.signal
+      );
+
+      if (abortController.signal.aborted) return;
+
+      if (!extractedFiles || extractedFiles.length === 0) {
+        throw new Error("No se pudo extraer ningún archivo del paquete comprimido.");
+      }
+
+      console.log(`[StreamManager] Archivo ${task.fileName} descomprimido con éxito: ${extractedFiles.length} archivo(s).`);
+
+      // --- FASE 3: SUBIDA DE ARCHIVO(S) DESCOMPRIMIDO(S) A GOOGLE DRIVE ---
+      task.archivePhase = "uploading";
+      task.status = "streaming";
+
+      let effectiveToken = accessToken;
+      try {
+        const fresh = await rcloneAuthManager.getValidAccessToken(task.accountEmail);
+        if (fresh) effectiveToken = fresh;
+      } catch {}
+
+      for (let fileIdx = 0; fileIdx < extractedFiles.length; fileIdx++) {
+        if (abortController.signal.aborted) break;
+
+        const localFile = extractedFiles[fileIdx];
+        const extractedFileName = path.basename(localFile);
+        const extractedSize = fs.statSync(localFile).size;
+
+        task.extractedFileName = extractedFileName;
+        task.fileSize = extractedSize;
+        task.fileSizeFormatted = formatBytes(extractedSize);
+        task.uploadedBytes = 0;
+        task.uploadedBytesFormatted = "0 Bytes";
+        task.progressPercent = 0;
+        task.speedMBs = 0;
+        task.statusText = extractedFiles.length > 1
+          ? `Subiendo ${extractedFileName} (${fileIdx + 1}/${extractedFiles.length})...`
+          : `Subiendo archivo descomprimido (${extractedFileName})...`;
+        this.saveTasksToDisk();
+
+        const uploadName = extractedFileName;
+
+        const sessionUri = await this.initDriveResumableUpload(
+          effectiveToken,
+          task.driveFolderId,
+          uploadName,
+          extractedSize
+        );
+        task.resumableUploadUrl = sessionUri;
+        this.saveTasksToDisk();
+
+        const fd = fs.openSync(localFile, "r");
+        const chunkSizeBytes = task.chunkSizeBytes || 16 * 1024 * 1024;
+        let offset = 0;
+        let lastUploadTime = Date.now();
+
+        try {
+          while (offset < extractedSize) {
+            if (abortController.signal.aborted) break;
+
+            const currentChunkLen = Math.min(chunkSizeBytes, extractedSize - offset);
+            const chunkBuf = Buffer.alloc(currentChunkLen);
+            fs.readSync(fd, chunkBuf, 0, currentChunkLen, offset);
+
+            const end = offset + currentChunkLen;
+            const putTimeout = AbortSignal.timeout(60000);
+            const combinedPutSignal = AbortSignal.any([abortController.signal, putTimeout]);
+
+            const driveRes = await fetchWithRetry(sessionUri, {
+              method: "PUT",
+              headers: {
+                "Content-Length": currentChunkLen.toString(),
+                "Content-Range": `bytes ${offset}-${end - 1}/${extractedSize}`,
+              },
+              body: chunkBuf,
+              signal: combinedPutSignal,
+            });
+
+            if (driveRes.status === 308 || driveRes.status === 200 || driveRes.status === 201) {
+              const now = Date.now();
+              const diffSec = Math.max(0.1, (now - lastUploadTime) / 1000);
+              const speedMBs = Math.round((currentChunkLen / (1024 * 1024) / diffSec) * 10) / 10;
+              lastUploadTime = now;
+
+              offset = end;
+              task.uploadedBytes = offset;
+              task.uploadedBytesFormatted = formatBytes(offset);
+              task.progressPercent = Math.min(100, Math.round((offset / extractedSize) * 100));
+              task.speedMBs = speedMBs;
+              task.statusText = `Subiendo descomprimido (${task.progressPercent}%, ${speedMBs} MB/s)...`;
+
+              if (driveRes.status === 200 || driveRes.status === 201 || offset >= extractedSize) {
+                const resultData = driveRes.status !== 308 ? await driveRes.json().catch(() => ({})) : {};
+                if (resultData.id) task.finalDriveFileId = resultData.id;
+                if (resultData.webViewLink) task.webViewLink = resultData.webViewLink;
+                break;
+              }
+              this.saveTasksToDisk();
+            } else {
+              const errText = await driveRes.text();
+              throw new Error(`Google Drive HTTP ${driveRes.status}: ${errText}`);
+            }
+          }
+        } finally {
+          fs.closeSync(fd);
+        }
+      }
+
+      if (!abortController.signal.aborted) {
+        task.status = "completed";
+        task.archivePhase = "done";
+        task.error = undefined;
+        task.statusText = undefined;
+        task.progressPercent = 100;
+        task.speedMBs = 0;
+        task.completedAt = Date.now();
+        this.saveTasksToDisk();
+      }
+    } catch (err: any) {
+      console.error(`[StreamManager] Error en descompresión/subida para ${task.fileName}:`, err?.message);
+      if (!abortController.signal.aborted && task.status === "streaming") {
+        task.status = "error";
+        task.error = err?.message || "Error al descomprimir y subir a Google Drive";
+        task.statusText = "Error en descompresión/subida";
+        this.saveTasksToDisk();
+      }
+    } finally {
+      this.abortControllers.delete(taskId);
+      try {
+        if (fs.existsSync(taskTempDir)) {
+          fs.rmSync(taskTempDir, { recursive: true, force: true });
+        }
+      } catch (cleanErr: any) {
+        console.warn(`[StreamManager] No se pudo limpiar carpeta temporal ${taskTempDir}:`, cleanErr?.message);
+      }
+      this.saveTasksToDisk();
+      this.dispatchQueue();
+    }
+  }
+
   private async fetchDirectHttpChunk(
     url: string,
     start: number,
@@ -2333,12 +2687,19 @@ export class StreamTransferManager {
 
     let effectiveUrl = url;
     const isMediaFire = isMediafireUrl(url);
+    const isFireload = isFireloadUrl(url);
 
     if (isMediaFire && !/^https?:\/\/download\d*\.mediafire\.com\//i.test(url)) {
       try {
         effectiveUrl = await getOrResolveMediafireDirectLink(url);
       } catch (mfErr: any) {
         console.warn(`[StreamManager] Error resolviendo enlace de MediaFire para ${url}:`, mfErr?.message);
+      }
+    } else if (isFireload && !/^https?:\/\/srv\d*\.fireload\.com\//i.test(url)) {
+      try {
+        effectiveUrl = await getOrResolveFireloadDirectLink(url);
+      } catch (flErr: any) {
+        console.warn(`[StreamManager] Error resolviendo enlace de Fireload para ${url}:`, flErr?.message);
       }
     }
 
@@ -2352,11 +2713,26 @@ export class StreamTransferManager {
       });
 
       if (!res.ok && res.status !== 206) {
-        // If MediaFire direct link expired (403, 404, 410), refresh and retry once
+        // If MediaFire or Fireload direct link expired (403, 404, 410), refresh and retry once
         if (isMediaFire && (res.status === 403 || res.status === 404 || res.status === 410)) {
           console.warn(`[StreamManager] Enlace de MediaFire expirado (${res.status}), renovando...`);
           invalidateMediafireDirectLinkCache(url);
           effectiveUrl = await getOrResolveMediafireDirectLink(url, true);
+          const retryRes = await fetchWithRetry(effectiveUrl, {
+            headers: {
+              Range: `bytes=${start}-${end - 1}`,
+              "User-Agent": "Mozilla/5.0 (ServerSpecs Drive Streamer 1.0)",
+            },
+            signal: combinedSignal,
+          });
+          if (retryRes.ok || retryRes.status === 206) {
+            const arrayBuf = await retryRes.arrayBuffer();
+            return Buffer.from(arrayBuf);
+          }
+        } else if (isFireload && (res.status === 403 || res.status === 404 || res.status === 410)) {
+          console.warn(`[StreamManager] Enlace de Fireload expirado (${res.status}), renovando...`);
+          invalidateFireloadDirectLinkCache(url);
+          effectiveUrl = await getOrResolveFireloadDirectLink(url, true);
           const retryRes = await fetchWithRetry(effectiveUrl, {
             headers: {
               Range: `bytes=${start}-${end - 1}`,
@@ -2381,6 +2757,22 @@ export class StreamTransferManager {
         try {
           invalidateMediafireDirectLinkCache(url);
           effectiveUrl = await getOrResolveMediafireDirectLink(url, true);
+          const retryRes = await fetchWithRetry(effectiveUrl, {
+            headers: {
+              Range: `bytes=${start}-${end - 1}`,
+              "User-Agent": "Mozilla/5.0 (ServerSpecs Drive Streamer 1.0)",
+            },
+            signal: combinedSignal,
+          });
+          if (retryRes.ok || retryRes.status === 206) {
+            const arrayBuf = await retryRes.arrayBuffer();
+            return Buffer.from(arrayBuf);
+          }
+        } catch {}
+      } else if (isFireload && !err?.name?.includes("Abort")) {
+        try {
+          invalidateFireloadDirectLinkCache(url);
+          effectiveUrl = await getOrResolveFireloadDirectLink(url, true);
           const retryRes = await fetchWithRetry(effectiveUrl, {
             headers: {
               Range: `bytes=${start}-${end - 1}`,

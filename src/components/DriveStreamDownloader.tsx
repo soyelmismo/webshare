@@ -28,6 +28,7 @@ import {
   Download,
   ChevronDown,
   ChevronRight,
+  Archive,
 } from "lucide-react";
 import {
   StreamTask,
@@ -95,6 +96,7 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
   const [customFilename, setCustomFilename] = useState("");
   const [chunkSizeMB, setChunkSizeMB] = useState(25);
   const [torrentBase64, setTorrentBase64] = useState<string | null>(null);
+  const [decompressArchives, setDecompressArchives] = useState<boolean>(true);
 
   // Folder selection state
   const [userFolders, setUserFolders] = useState<DriveFolderInfo[]>([]);
@@ -241,6 +243,9 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
       if (info.suggestedFilename && !customFilename) {
         setCustomFilename(info.suggestedFilename);
       }
+      if (info.hasArchives) {
+        setDecompressArchives(true);
+      }
       if (info.files && info.files.length > 0) {
         // By default select all files in multi-file torrent
         setSelectedFilePaths(new Set(info.files.map((f) => f.path)));
@@ -302,13 +307,16 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
         try {
           currentSourceInfo = await inspectStreamUrl(url.trim(), torrentBase64 || undefined);
           setSourceInfo(currentSourceInfo);
+          if (currentSourceInfo?.hasArchives) {
+            setDecompressArchives(true);
+          }
           if (currentSourceInfo?.files && currentSourceInfo.files.length > 0) {
             setSelectedFilePaths(new Set(currentSourceInfo.files.map((f) => f.path)));
           }
         } catch {}
       }
 
-      // If multi-file torrent or MediaFire folder, queue all selected files (or all files if none explicitly filtered)
+      // If multi-file torrent, Fireload folder or MediaFire folder, queue all selected files (or all files if none explicitly filtered)
       if (currentSourceInfo?.files && currentSourceInfo.files.length > 1) {
         const filesToQueue = selectedFilePaths.size > 0
           ? currentSourceInfo.files.filter((f) => selectedFilePaths.has(f.path))
@@ -322,6 +330,7 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
             accessToken: activeTokenStr,
             chunkSizeMB: Number(chunkSizeMB) || 25,
             torrentBase64: torrentBase64 || undefined,
+            extractArchive: decompressArchives,
             files: filesToQueue.map((f) => ({
               path: f.path,
               length: f.length,
@@ -356,6 +365,7 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
         torrentBase64: torrentBase64 || undefined,
         selectedFilePath: singleFile?.path,
         selectedFileSize: singleFile?.length,
+        extractArchive: decompressArchives,
       });
       setActiveTaskId(result.task.id);
 
@@ -406,7 +416,7 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
               Streaming Directo de URL / Torrent a Google Drive
             </h2>
             <p className="text-xs text-[#9ca3af]">
-              Soporta URLs HTTP/HTTPS, carpetas de MediaFire, enlaces Magnet y archivos .torrent multi-archivo. Transfiere directo a cualquier carpeta de tu Google Drive.
+              Soporta URLs HTTP/HTTPS, Fireload (archivos y carpetas), MediaFire, enlaces Magnet y archivos .torrent multi-archivo. Transfiere directo o descomprime a cualquier carpeta de tu Google Drive.
             </p>
           </div>
         </div>
@@ -506,7 +516,7 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
           <div className="space-y-1">
             <div className="flex items-center justify-between">
               <label className="text-xs font-semibold text-[#9ca3af] block">
-                Origen: Enlace HTTP, Carpeta MediaFire, Magnet URL o Archivo .torrent:
+                Origen: Enlace HTTP, Carpeta Fireload / MediaFire, Magnet URL o Archivo .torrent:
               </label>
               <label className="text-xs text-[#34d399] hover:underline cursor-pointer flex items-center gap-1">
                 <FileUp className="w-3.5 h-3.5" />
@@ -529,7 +539,7 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
                   setUrl(e.target.value);
                   setTorrentBase64(null);
                 }}
-                placeholder="https://.../iso.iso, carpeta de MediaFire o magnet:?xt=urn:btih:..."
+                placeholder="https://.../iso.iso, carpeta Fireload/MediaFire o magnet:?xt=urn:btih:..."
                 className="flex-1 px-3 py-2 bg-[#101317] border border-[#22272e] rounded-lg text-xs font-mono text-[#f3f4f6] placeholder-[#6b7280] focus:outline-none focus:border-[#10b981]"
               />
               <button
@@ -572,7 +582,9 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
             <div className="p-3 rounded-lg bg-[#101317] border border-[#22272e] font-mono text-xs space-y-2">
               <div className="flex items-center justify-between font-bold text-[#f3f4f6]">
                 <span className="flex items-center gap-1.5">
-                  {sourceInfo.isMediafire ? (
+                  {sourceInfo.isFireload ? (
+                    <Folder className="w-4 h-4 text-[#f87171]" />
+                  ) : sourceInfo.isMediafire ? (
                     <Folder className="w-4 h-4 text-[#10b981]" />
                   ) : sourceInfo.sourceType === "torrent" ? (
                     <FileCode className="w-4 h-4 text-[#10b981]" />
@@ -581,20 +593,40 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
                   )}
                   {sourceInfo.suggestedFilename}
                 </span>
-                <span className="text-[#34d399]">
-                  {sourceInfo.fileSizeFormatted || formatBytes(sourceInfo.fileSize || 0)}
-                </span>
+                <div className="flex items-center gap-2">
+                  {sourceInfo.isFireload && (
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-[#ef4444]/20 text-[#f87171] border border-[#ef4444]/50 flex items-center gap-1">
+                      <Folder className="w-3 h-3 text-[#f87171]" />
+                      Fireload
+                    </span>
+                  )}
+                  {sourceInfo.hasArchives && (
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-[#d97706]/20 text-[#fbbf24] border border-[#f59e0b]/50 flex items-center gap-1">
+                      <Archive className="w-3 h-3 text-[#fbbf24]" />
+                      Comprimidos Detectados
+                    </span>
+                  )}
+                  <span className="text-[#34d399]">
+                    {sourceInfo.fileSizeFormatted || formatBytes(sourceInfo.fileSize || 0)}
+                  </span>
+                </div>
               </div>
 
-              {/* Multi-file Torrent / MediaFire Folder Selector with Hierarchical Folder Tree */}
+              {/* Multi-file Torrent / Fireload / MediaFire Folder Selector with Hierarchical Folder Tree */}
               {sourceInfo.files && sourceInfo.files.length > 1 && (
                 <div className="pt-2 border-t border-[#22272e] space-y-2.5">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[#9ca3af]">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-bold text-[#f3f4f6] flex items-center gap-1 text-xs">
                         <ListFilter className="w-3.5 h-3.5 text-[#10b981]" />
-                        {sourceInfo.isMediafire ? "Archivos en la Carpeta MediaFire" : "Archivos en el Torrent"} ({sourceInfo.files.length}):
+                        {sourceInfo.isFireload ? "Archivos en la Carpeta Fireload" : sourceInfo.isMediafire ? "Archivos en la Carpeta MediaFire" : "Archivos en el Torrent"} ({sourceInfo.files.length}):
                       </span>
+                      {sourceInfo.isFireload && (
+                        <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-[#ef4444]/20 text-[#f87171] border border-[#ef4444]/50 flex items-center gap-1">
+                          <Folder className="w-3 h-3 text-[#f87171]" />
+                          Fireload
+                        </span>
+                      )}
                       {sourceInfo.isMediafire && (
                         <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-[#1e3a8a]/40 text-[#60a5fa] border border-[#3b82f6]/50 flex items-center gap-1">
                           <Folder className="w-3 h-3 text-[#60a5fa]" />
@@ -851,6 +883,28 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
             </div>
           </div>
 
+          {/* Decompress Archives Option */}
+          <div className="p-3 bg-[#101317] border border-[#22272e] rounded-lg flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <Archive className="w-4 h-4 text-[#10b981] shrink-0" />
+              <div>
+                <label htmlFor="decompress-archives-toggle" className="text-xs font-bold text-[#f3f4f6] cursor-pointer block">
+                  Descomprimir archivos al subir a Google Drive
+                </label>
+                <span className="text-[11px] text-[#9ca3af]">
+                  Extrae paquetes .7z, .zip, .rar o .7z.001 con 7-Zip en el servidor y sube los ficheros resultantes directamente a Drive.
+                </span>
+              </div>
+            </div>
+            <input
+              id="decompress-archives-toggle"
+              type="checkbox"
+              checked={decompressArchives}
+              onChange={(e) => setDecompressArchives(e.target.checked)}
+              className="w-4 h-4 accent-[#10b981] rounded cursor-pointer shrink-0 ml-3"
+            />
+          </div>
+
           {startError && (
             <div className="p-2.5 rounded-lg bg-[#7f1d1d]/30 border border-[#ef4444]/40 text-[#f87171] text-xs flex items-center gap-2">
               <AlertCircle className="w-3.5 h-3.5 shrink-0" />
@@ -895,14 +949,26 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
         return (
           <div className="bg-[#14171a] border border-[#10b981]/40 rounded-xl p-4 space-y-3 bg-gradient-to-br from-[#064e3b]/25 via-[#14171a] to-[#101317] shadow-lg">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <div className="flex items-center gap-2 min-w-0">
+              <div className="flex items-center gap-2 min-w-0 flex-wrap">
                 <Activity className="w-4 h-4 text-[#10b981] animate-pulse shrink-0" />
                 <span className="text-xs font-bold text-[#f3f4f6] truncate">
-                  Stream Activo en RAM: {activeTask.fileName}
+                  Stream Activo: {activeTask.extractedFileName || activeTask.fileName}
                 </span>
                 <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-[#10b981]/20 text-[#34d399] border border-[#059669]/50 shrink-0">
                   {activeTask.status}
                 </span>
+                {activeTask.archivePhase && (
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#d97706]/20 text-[#fbbf24] border border-[#f59e0b]/50 shrink-0 flex items-center gap-1">
+                    <Archive className="w-3 h-3 text-[#fbbf24]" />
+                    {activeTask.archivePhase === "downloading"
+                      ? "Descargando comprimido"
+                      : activeTask.archivePhase === "extracting"
+                      ? "Descomprimiendo (7z)"
+                      : activeTask.archivePhase === "uploading"
+                      ? "Subiendo descomprimido"
+                      : "Completado"}
+                  </span>
+                )}
               </div>
 
               <div className="flex items-center gap-3 text-xs font-mono shrink-0">
@@ -926,6 +992,9 @@ export const DriveStreamDownloader: React.FC<DriveStreamDownloaderProps> = ({
               <div className="flex justify-between text-[11px] font-mono text-[#9ca3af]">
                 <span>
                   {formatBytes(activeTask.uploadedBytes)} de {formatBytes(activeTask.fileSize)}
+                  {activeTask.statusText && (
+                    <span className="ml-2 text-[#f59e0b] font-normal">({activeTask.statusText})</span>
+                  )}
                 </span>
                 <span className="text-[#10b981] font-bold">{activeTask.progressPercent}%</span>
               </div>

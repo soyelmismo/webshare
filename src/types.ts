@@ -361,6 +361,9 @@ export interface StreamDriveTask {
   queueIndex?: number;
   totalInBatch?: number;
   batchId?: string;
+  extractArchive?: boolean;
+  extractedFileName?: string;
+  archivePhase?: "downloading" | "extracting" | "uploading" | "done";
 }
 
 export interface StreamManifestData {
@@ -389,6 +392,8 @@ export interface StreamManifestData {
   queueIndex?: number;
   totalInBatch?: number;
   batchId?: string;
+  extractArchive?: boolean;
+  extractedFileName?: string;
 }
 
 export interface DriveSessionAuditResult {

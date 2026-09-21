@@ -11,6 +11,11 @@ import {
   findFastestWebSeedMirror,
   InspectedFileInfo,
 } from "./torrentParser.js";
+import {
+  isMediafireUrl,
+  getOrResolveMediafireDirectLink,
+  invalidateMediafireDirectLinkCache,
+} from "./mediafireResolver.js";
 
 export { formatBytes };
 
@@ -1714,7 +1719,7 @@ export class StreamTransferManager {
     accountEmail?: string;
     customChunkSizeMB?: number;
     torrentBase64?: string;
-    files: Array<{ path: string; length: number; name?: string }>;
+    files: Array<{ path: string; length: number; name?: string; url?: string }>;
   }): Promise<{ batchId: string; tasks: StreamDriveTask[] }> {
     const {
       sourceUrl,
@@ -1779,12 +1784,17 @@ export class StreamTransferManager {
         availableSlots--;
       }
 
+      const matchingInspected = inspected.files?.find(
+        (inf) => inf.path === cleanPath || inf.name === fileName
+      );
+      const fileUrl = (file as any).url || (matchingInspected as any)?.url || sourceUrl;
+
       const taskId = `stream_${now}_${i}_${Math.random().toString(36).substring(2, 6)}`;
       const task: StreamDriveTask = {
         id: taskId,
         accountEmail: accountEmail || undefined,
         fileName,
-        sourceUrl,
+        sourceUrl: fileUrl,
         sourceType: inspected.sourceType || "torrent",
         torrentBase64: undefined, // Deduplicated: cached once in sharedTorrentBase64 for batchId
         webSeeds: inspected.webSeeds,
@@ -2321,22 +2331,71 @@ export class StreamTransferManager {
     const timeoutSignal = AbortSignal.timeout(15000);
     const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 
-    const res = await fetchWithRetry(url, {
-      headers: {
-        Range: `bytes=${start}-${end - 1}`,
-        "User-Agent": "Mozilla/5.0 (ServerSpecs Drive Streamer 1.0)",
-      },
-      signal: combinedSignal,
-    });
+    let effectiveUrl = url;
+    const isMediaFire = isMediafireUrl(url);
 
-    if (!res.ok && res.status !== 206) {
-      throw new Error(
-        `Servidor HTTP ${res.status} al pedir rango ${start}-${end - 1}.`
-      );
+    if (isMediaFire && !/^https?:\/\/download\d*\.mediafire\.com\//i.test(url)) {
+      try {
+        effectiveUrl = await getOrResolveMediafireDirectLink(url);
+      } catch (mfErr: any) {
+        console.warn(`[StreamManager] Error resolviendo enlace de MediaFire para ${url}:`, mfErr?.message);
+      }
     }
 
-    const arrayBuf = await res.arrayBuffer();
-    return Buffer.from(arrayBuf);
+    try {
+      const res = await fetchWithRetry(effectiveUrl, {
+        headers: {
+          Range: `bytes=${start}-${end - 1}`,
+          "User-Agent": "Mozilla/5.0 (ServerSpecs Drive Streamer 1.0)",
+        },
+        signal: combinedSignal,
+      });
+
+      if (!res.ok && res.status !== 206) {
+        // If MediaFire direct link expired (403, 404, 410), refresh and retry once
+        if (isMediaFire && (res.status === 403 || res.status === 404 || res.status === 410)) {
+          console.warn(`[StreamManager] Enlace de MediaFire expirado (${res.status}), renovando...`);
+          invalidateMediafireDirectLinkCache(url);
+          effectiveUrl = await getOrResolveMediafireDirectLink(url, true);
+          const retryRes = await fetchWithRetry(effectiveUrl, {
+            headers: {
+              Range: `bytes=${start}-${end - 1}`,
+              "User-Agent": "Mozilla/5.0 (ServerSpecs Drive Streamer 1.0)",
+            },
+            signal: combinedSignal,
+          });
+          if (retryRes.ok || retryRes.status === 206) {
+            const arrayBuf = await retryRes.arrayBuffer();
+            return Buffer.from(arrayBuf);
+          }
+        }
+        throw new Error(
+          `Servidor HTTP ${res.status} al pedir rango ${start}-${end - 1}.`
+        );
+      }
+
+      const arrayBuf = await res.arrayBuffer();
+      return Buffer.from(arrayBuf);
+    } catch (err: any) {
+      if (isMediaFire && !err?.name?.includes("Abort")) {
+        try {
+          invalidateMediafireDirectLinkCache(url);
+          effectiveUrl = await getOrResolveMediafireDirectLink(url, true);
+          const retryRes = await fetchWithRetry(effectiveUrl, {
+            headers: {
+              Range: `bytes=${start}-${end - 1}`,
+              "User-Agent": "Mozilla/5.0 (ServerSpecs Drive Streamer 1.0)",
+            },
+            signal: combinedSignal,
+          });
+          if (retryRes.ok || retryRes.status === 206) {
+            const arrayBuf = await retryRes.arrayBuffer();
+            return Buffer.from(arrayBuf);
+          }
+        } catch {}
+      }
+      throw err;
+    }
   }
 
   /**

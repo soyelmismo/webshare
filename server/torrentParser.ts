@@ -1,4 +1,11 @@
 import crypto from "crypto";
+import {
+  isMediafireUrl,
+  isMediafireFolderUrl,
+  isMediafireFileUrl,
+  resolveMediafireFolder,
+  inspectMediafireFile,
+} from "./mediafireResolver.js";
 
 export interface InspectedFileInfo {
   fileName: string;
@@ -9,10 +16,11 @@ export interface InspectedFileInfo {
   infoHash?: string;
   pieceLength?: number;
   piecesCount?: number;
-  files?: Array<{ name: string; length: number; path: string }>;
+  files?: Array<{ name: string; length: number; path: string; url?: string; quickkey?: string }>;
   torrentBase64?: string;
   webSeeds?: string[];
   activeMirrorUrl?: string;
+  isMediafire?: boolean;
 }
 
 export function formatBytes(bytes: number, decimals = 2): string {
@@ -403,6 +411,36 @@ export async function inspectAnySource(
   }
 
   const trimmed = (sourceUrl || "").trim();
+
+  // 1.5. MediaFire Folder & File Support
+  if (isMediafireFolderUrl(trimmed)) {
+    try {
+      return await resolveMediafireFolder(trimmed);
+    } catch (mfErr: any) {
+      console.warn("[MediaFire] Error inspeccionando carpeta de MediaFire:", mfErr?.message);
+      throw mfErr;
+    }
+  }
+
+  if (isMediafireFileUrl(trimmed)) {
+    try {
+      return await inspectMediafireFile(trimmed);
+    } catch (mfErr: any) {
+      console.warn("[MediaFire] Error inspeccionando archivo de MediaFire:", mfErr?.message);
+    }
+  }
+
+  if (isMediafireUrl(trimmed)) {
+    try {
+      return await resolveMediafireFolder(trimmed);
+    } catch {
+      try {
+        return await inspectMediafireFile(trimmed);
+      } catch (mfErr: any) {
+        console.warn("[MediaFire] Error al inspeccionar URL genérica de MediaFire:", mfErr?.message);
+      }
+    }
+  }
 
   // 2. If it's a magnet link
   if (trimmed.startsWith("magnet:")) {

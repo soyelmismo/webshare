@@ -517,7 +517,7 @@ export async function syncRcloneActiveToken(): Promise<string | null> {
       if (res.status === 404 || res.status === 400) {
         // Backend confirms Rclone auto-renewal is NOT configured on this machine/instance
         isServerAutoRenewVerified = false;
-        notifySessionChange();
+        notifyDriveSessionChanged();
       }
       return null;
     }

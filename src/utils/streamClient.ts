@@ -16,8 +16,9 @@ export interface StreamSourceInfo {
   fileSizeFormatted?: string;
   acceptRanges?: boolean;
   sourceType?: "direct" | "torrent";
-  files?: Array<{ name: string; length: number; path: string }>;
+  files?: Array<{ name: string; length: number; path: string; url?: string; quickkey?: string }>;
   torrentBase64?: string;
+  isMediafire?: boolean;
 }
 
 export async function inspectStreamUrl(url: string, torrentBase64?: string): Promise<StreamSourceInfo> {
@@ -64,7 +65,7 @@ export async function startBatchStreamJob(params: {
   accessToken: string;
   chunkSizeMB?: number;
   torrentBase64?: string;
-  files: Array<{ path: string; length: number; name?: string }>;
+  files: Array<{ path: string; length: number; name?: string; url?: string }>;
 }): Promise<{ batchId: string; tasks: StreamTask[] }> {
   const result = await startBatchStreamToDrive({
     sourceUrl: params.sourceUrl,

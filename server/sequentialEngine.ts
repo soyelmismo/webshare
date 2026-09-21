@@ -3,6 +3,12 @@ import path from "path";
 import os from "os";
 import { formatBytes } from "./streamManager.js";
 import { SequentialStreamJob, SequentialEngineStatus } from "../src/types.js";
+import {
+  isMediafireUrl,
+  isMediafireFolderUrl,
+  resolveMediafireDirectDownloadLink,
+  getOrResolveMediafireDirectLink,
+} from "./mediafireResolver.js";
 
 export interface SequentialEngineStartOptions {
   url: string;
@@ -143,9 +149,22 @@ export class SequentialChunkEngine {
       };
     }
 
+    let inspectUrl = url;
+    let mfFileName = "";
+
+    if (isMediafireUrl(url) && !isMediafireFolderUrl(url)) {
+      try {
+        const resolved = await resolveMediafireDirectDownloadLink(url);
+        inspectUrl = resolved.directUrl;
+        mfFileName = resolved.fileName;
+      } catch (err: any) {
+        console.warn("[SequentialEngine] Error resolviendo enlace MediaFire:", err.message);
+      }
+    }
+
     try {
       // 1. Try HEAD request
-      const headRes = await fetch(url, {
+      const headRes = await fetch(inspectUrl, {
         method: "HEAD",
         headers: { "User-Agent": "Mozilla/5.0 (SequentialStreamPipeline/2.0)" },
       });
@@ -302,7 +321,16 @@ export class SequentialChunkEngine {
     end: number,
     signal?: AbortSignal
   ): Promise<Buffer> {
-    const res = await fetch(url, {
+    let effectiveUrl = url;
+    if (isMediafireUrl(url) && !/^https?:\/\/download\d*\.mediafire\.com\//i.test(url)) {
+      try {
+        effectiveUrl = await getOrResolveMediafireDirectLink(url);
+      } catch (err: any) {
+        console.warn("[SequentialEngine] Error resolviendo direct link MediaFire:", err.message);
+      }
+    }
+
+    const res = await fetch(effectiveUrl, {
       method: "GET",
       headers: {
         Range: `bytes=${start}-${end - 1}`,

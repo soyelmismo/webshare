@@ -18,6 +18,11 @@ import {
   BACKBONE_SERVERS,
   benchmarkAllBackboneServers,
 } from "./server/speedTestEngine.js";
+import {
+  isMediafireUrl,
+  isMediafireFolderUrl,
+  getOrResolveMediafireDirectLink,
+} from "./server/mediafireResolver.js";
 
 // Background rolling history buffer for server real-time charts
 interface HistoryPoint {
@@ -857,9 +862,18 @@ app.use(express.json({ limit: "50mb" }));
         return res.status(400).json({ error: "Protocolo no válido. Solo se admiten HTTP y HTTPS." });
       }
 
-      const response = await fetch(targetUrl, {
+      let effectiveUrl = targetUrl;
+      if (isMediafireUrl(targetUrl) && !isMediafireFolderUrl(targetUrl)) {
+        try {
+          effectiveUrl = await getOrResolveMediafireDirectLink(targetUrl);
+        } catch (mfErr: any) {
+          console.warn("[Download Proxy] Error resolviendo enlace directo MediaFire:", mfErr?.message);
+        }
+      }
+
+      const response = await fetch(effectiveUrl, {
         headers: {
-          "User-Agent": "ServerSpecsDownloader/1.0",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ServerSpecsDownloader/1.0",
         },
       });
 
